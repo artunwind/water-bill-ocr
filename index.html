@@ -35,7 +35,7 @@
 </header>
 
 <div class="card">
-  <input type="file" id="fileInput" accept="image/*" multiple capture="environment">
+  <input type="file" id="fileInput" accept="image/*" multiple>
   <button id="clearBtn" class="btn secondary">Clear</button>
   <button id="exportBtn" class="btn primary">Export to Excel</button>
   <div id="status" style="margin-top:10px;color:#555"></div>
@@ -66,9 +66,9 @@ function resizeImage(file,maxWidth=1000){
     const reader=new FileReader();
     reader.onload=e=>{
       img.onload=()=>{
-        const scale=maxWidth/img.width;
+        const scale=Math.min(1,maxWidth/img.width);
         const canvas=document.createElement('canvas');
-        canvas.width=maxWidth;
+        canvas.width=img.width*scale;
         canvas.height=img.height*scale;
         const ctx=canvas.getContext('2d');
         ctx.drawImage(img,0,0,canvas.width,canvas.height);
