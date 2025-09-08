@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Water Bill OCR — Mobile</title>
+
+<!-- Tesseract.js -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.1.1/dist/tesseract.min.js"></script>
+<!-- SheetJS -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+
+<style>
+  :root{
+    --bg:#f2f6fb;
+    --card:#ffffff;
+    --accent1: linear-gradient(135deg,#4facfe 0%,#00f2fe 100%);
+    --accent2:#4facfe;
+    --muted:#6b7280;
+    --glass: rgba(255,255,255,0.7);
+  }
+  html,body{height:100%;margin:0;font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial;}
+  body{background:var(--bg);display:flex;align-items:flex-start;justify-content:center;padding:18px 12px 40px;}
+  .app{
+    width:100%;
+    max-width:480px;
+  }
+  header{
+    background: var(--accent1);
+    color:white;
+    border-radius:14px;
+    padding:18px;
+    box-shadow:0 8px 20px rgba(15,23,42,0.12);
+    margin-bottom:14px;
+  }
+  header h1{margin:0;font-size:20px;letter-spacing:0.2px}
+  header p{margin:6px 0 0;font-size:13px;opacity:0.95}
+  .card{
+    background:var(--card);
+    border-radius:12px;
+    padding:12px;
+    box-shadow:0 6px 18px rgba(15,23,42,0.06);
+    margin-bottom:12px;
+  }
+  .controls{display:flex;gap:10px;flex-wrap:wrap}
+  .btn{
+    flex:1;
+    min-width:120px;
+    background:var(--accent2);
+    color:white;
+    border:none;
+    padding:12px 14px;
+    border-radius:10px;
+    font-weight:600;
+    font-size:15px;
+    box-shadow:0 6px 12px rgba(79,172,254,0.25);
+  }
+  .btn.secondary{
+    background:transparent;color:var(--accent2);border:1px solid rgba(79,172,254,0.18);box-shadow:none;font-weight:700;
+  }
+  .small{font-size:13px;padding:9px 12px}
+  .note{font-size:13px;color:var(--muted);margin-top:8px}
+  input[type="file"]{display:none}
+  .upload-label{
+    display:flex;align-items:center;gap:10px;padding:10px;border-radius:10px;border:1px dashed rgba(15,23,42,0.06);
+    cursor:pointer;color:var(--muted);
+    background:linear-gradient(180deg, rgba(255,255,255,0.6), rgba(255,255,255,0.4));
+  }
+  .results{
+    max-height:360px;
+    overflow:auto;
+    -webkit-overflow-scrolling:touch;
+    margin-top:8px;
+  }
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{padding:10px;text-align:left;border-bottom:1px solid #f3f4f6}
+  th{background:#fbfdff;position:sticky;top:0}
+  tr:nth-child(even){background:#fbfbff}
+  .status-row{display:flex;align-items:center;gap:10px;justify-content:space-between;padding:8px 6px;border-radius:8px;background:linear-gradient(180deg,rgba(255,255,255,0.8),rgba(250,250,250,0.9));margin-bottom:10px}
+  .spinner{
+    width:22px;height:22px;border-radius:50%;border:3px solid rgba(0,0,0,0.08);border-top-color:var(--accent2);animation:spin 1s linear infinite;display:inline-block;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+  footer{margin-top:12px;text-align:center;color:var(--muted);font-size:13px}
+  @media (max-width:420px){
+    header h1{font-size:18px}
+    .btn{font-size:14px;padding:10px}
+  }
+</style>
+</head>
+<body>
+  <div class="app" role="main">
+    <header>
+      <h1>📄 Water Bill OCR</h1>
+      <p>Scan bills (camera or photos) to extract <strong>Meter No.</strong> and <strong>Consumption Qty</strong></p>
+    </header>
+
+    <div class="card">
+      <div class="controls">
+        <label class="upload-label" for="fileInput" title="Upload pictures or use camera on mobile">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" style="flex-shrink:0"><path d="M12 5v14" stroke="#4facfe" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 12l-7 7-7-7" stroke="#4facfe" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <div>
+            <div style="font-weight:700">Upload / Take Photo</div>
+            <div style="font-size:12px;color:var(--muted)">Multiple files supported</div>
+          </div>
+        </label>
+        <input id="fileInput" type="file" accept="image/*" multiple capture="environment">
+        <button id="clearBtn" class="btn secondary small">Clear</button>
+      </div>
+      <div class="note">Tip: Use the camera option on your phone for best OCR results. Crop tightly to the bill if possible.</div>
+    </div>
+
+    <div class="card">
+      <div class="status-row" id="statusRow" aria-live="polite">
+        <div id="statusText">No files uploaded</div>
+        <div id="statusSpinner" style="display:none" class="spinner" aria-hidden="true"></div>
+      </div>
+
+      <div class="results card" id="resultsWrapper" style="padding:0">
+        <table id="resultsTable" aria-describedby="statusText">
+          <thead>
+            <tr><th>File Name</th><th>Meter No.</th><th>Consumption</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div style="display:flex;gap:10px;margin-top:10px">
+        <button id="exportBtn" class="btn" style="flex:1">Export to Excel</button>
+        <button id="downloadJSON" class="btn secondary small" style="flex:0.9">Download JSON</button>
+      </div>
+    </div>
+
+    <footer>Made for mobile — works offline. Uses browser OCR & generates an Excel file on your device.</footer>
+  </div>
+
+<script>
+const fileInput = document.getElementById('fileInput');
+const resultsTableBody = document.querySelector('#resultsTable tbody');
+const statusText = document.getElementById('statusText');
+const statusSpinner = document.getElementById('statusSpinner');
+const exportBtn = document.getElementById('exportBtn');
+const clearBtn = document.getElementById('clearBtn');
+const downloadJSON = document.getElementById('downloadJSON');
+
+let results = [];
+
+function setStatus(text, busy=false){
+  statusText.textContent = text;
+  statusSpinner.style.display = busy ? 'inline-block' : 'none';
+}
+
+function appendRow(item){
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td>${escapeHtml(item.fileName)}</td><td>${escapeHtml(item.meterNo)}</td><td>${escapeHtml(item.consumption)}</td>`;
+  resultsTableBody.appendChild(tr);
+}
+
+function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+fileInput.addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
+  results = [];
+  resultsTableBody.innerHTML = '';
+  setStatus('Preparing OCR...', true);
+
+  // create a Tesseract worker for better performance
+  const worker = Tesseract.createWorker({
+    logger: m => {
+      // optional: progress messages
+      if (m && m.status) {
+        const p = m.progress ? Math.round(m.progress*100) : '';
+        setStatus(m.status + (p ? ` ${p}%` : ''), true);
+      }
+    }
+  });
+  await worker.load();
+  await worker.loadLanguage('eng');
+  await worker.initialize('eng');
+
+  for (let i=0;i<files.length;i++){
+    const file = files[i];
+    setStatus(`Processing ${file.name} (${i+1}/${files.length})`, true);
+
+    // read file as data URL for Tesseract
+    const dataURL = await fileToDataURL(file);
+    try {
+      const { data: { text } } = await worker.recognize(dataURL);
+      // attempt to find Meter No and Consumption using multiple regex patterns
+      const meterNo = extractMeterNo(text);
+      const consumption = extractConsumption(text);
+      const item = { fileName: file.name, meterNo, consumption };
+      results.push(item);
+      appendRow(item);
+    } catch(err) {
+      const item = { fileName: file.name, meterNo: 'Error', consumption: 'Error' };
+      results.push(item);
+      appendRow(item);
+      console.error('OCR error for', file.name, err);
+    }
+  }
+
+  await worker.terminate();
+  setStatus(`Done — ${results.length} file(s) processed`, false);
+});
+
+function fileToDataURL(file){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function extractMeterNo(text){
+  // try several likely patterns
+  const patterns = [
+    /Meter\s*No\.?\s*[:\-]?\s*([A-Z0-9\-]+)/i,
+    /METER\s*NO\.?\s*[:\-]?\s*([A-Z0-9\-]+)/i,
+    /Meter\s*Number\s*[:\-]?\s*([A-Z0-9\-]+)/i,
+    /([A-Z]{2,3}-\d{1,2}-\d{1,2}-\d{4,})/i, // example pattern like AJP-15-24-391727
+    /([A-Z0-9]{5,})/i
+  ];
+  for (const p of patterns){
+    const m = text.match(p);
+    if (m && m[1]){
+      // clean up trailing punctuation
+      return m[1].replace(/[^\w\-]/g,'').trim();
+    }
+  }
+  return 'Not Found';
+}
+
+function extractConsumption(text){
+  const patterns = [
+    /Consumption\s*Qty\.?\s*[:\-]?\s*(\d+)/i,
+    /Consumption\s*[:\-]?\s*(\d+)/i,
+    /KWH\s*[:\-]?\s*(\d+)/i,
+    /(\d{1,4})\s*(?:m3|m³|cu\.m|cubic)/i,
+    /Total\s*Consumption\s*[:\-]?\s*(\d+)/i,
+    /Previous\s*Reading\s*[:\-]?\s*(\d+)/i
+  ];
+  for (const p of patterns){
+    const m = text.match(p);
+    if (m && m[1]) return m[1].replace(/[^\d]/g,'').trim();
+  }
+  // fallback: search for any standalone small integers that might be consumption
+  const fallback = text.match(/\b(\d{1,4})\b/g);
+  if (fallback){
+    // pick the last small number (often consumption near bottom)
+    return fallback[fallback.length-1];
+  }
+  return 'Not Found';
+}
+
+exportBtn.addEventListener('click', () => {
+  if (!results.length){ alert('No data to export. Please upload bill images first.'); return; }
+  setStatus('Preparing Excel...', true);
+  try {
+    // convert to worksheet and download
+    const ws = XLSX.utils.json_to_sheet(results.map(r=>({ 'File Name': r.fileName, 'Meter No.': r.meterNo, 'Consumption Qty': r.consumption })));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Bills');
+    XLSX.writeFile(wb, 'bills.xlsx');
+    setStatus('Excel exported', false);
+  } catch(err){
+    console.error(err);
+    setStatus('Export failed', false);
+    alert('Excel export failed: '+err.message);
+  }
+});
+
+clearBtn.addEventListener('click', ()=>{
+  fileInput.value = '';
+  results = [];
+  resultsTableBody.innerHTML = '';
+  setStatus('Cleared', false);
+});
+
+downloadJSON.addEventListener('click', ()=>{
+  if (!results.length){ alert('No data to download.'); return; }
+  const blob = new Blob([JSON.stringify(results, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'bills.json'; document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 500);
+});
+</script>
+</body>
+</html>
