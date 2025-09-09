@@ -3,96 +3,79 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Water Bill OCR — Improved Matching</title>
+<title>Water Bill OCR — Editable</title>
 
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
 
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica Neue,Arial;
-       background:#f2f6fb;margin:0;padding:18px;max-width:720px;margin:auto;}
+       background:#f2f6fb;margin:0;padding:18px;max-width:820px;margin:auto;}
   header{background:linear-gradient(135deg,#4facfe,#00f2fe);color:white;padding:18px;border-radius:14px;}
   h1{margin:0;font-size:20px;}
   .card{background:white;padding:14px;margin-top:16px;border-radius:12px;box-shadow:0 4px 10px rgba(0,0,0,.08);}
-  .btn{padding:10px 14px;border:none;border-radius:8px;font-weight:600;font-size:15px;cursor:pointer;margin:4px;}
+  .btn{padding:8px 12px;border:none;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer;margin:4px;}
   .primary{background:#4facfe;color:white;}
   .secondary{background:#f9f9f9;color:#4facfe;border:1px solid #4facfe;}
   table{width:100%;border-collapse:collapse;font-size:14px;margin-top:10px;}
   th,td{padding:8px;border-bottom:1px solid #eee;word-break:break-word;text-align:center;}
   th{background:#fafafa;position:sticky;top:0;}
   tr:nth-child(even){background:#fcfcfc;}
-  .spinner{width:20px;height:20px;border:3px solid #ccc;border-top-color:#4facfe;border-radius:50%;
-           animation:spin 1s linear infinite;display:inline-block;}
   .warn{color:red;font-weight:bold;}
   .diff-red{color:red;font-weight:bold;}
   .diff-green{color:green;font-weight:bold;}
   .diff-gray{color:gray;}
   img.thumb{width:64px;height:auto;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,0.08);}
-  .row-flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
-  .col{flex:1;min-width:120px;}
-  pre.log{white-space:pre-wrap;background:#fff;border-radius:8px;padding:8px;margin-top:8px;font-size:12px;color:#333}
+  input.editable{border:1px solid #ccc;border-radius:4px;padding:4px;width:100%;box-sizing:border-box;}
+  input.edited{background:#fff7c2;}
+  #debug{display:none;margin-top:12px;}
+  pre.log{white-space:pre-wrap;background:#fff;border-radius:8px;padding:8px;font-size:12px;color:#333;}
 </style>
 </head>
 <body>
 <header>
-  <h1>📄 Water Bill OCR (Improved)</h1>
-  <p>Spatial extraction + robust matching between Step 1 and OCR results.</p>
+  <h1>📄 Water Bill OCR (Editable)</h1>
+  <p>With manual correction & auto recalculation</p>
 </header>
 
 <div class="card">
-  <h2>Step 1: Upload Previous Water Bill Excel (hidden table)</h2>
+  <h2>Step 1: Upload Previous Water Bill Excel</h2>
   <input type="file" id="prevExcel" accept=".xlsx,.xls" />
   <div id="prevStatus" style="margin-top:10px;color:#555"></div>
-  <div style="font-size:12px;color:#666">(We store the previous readings silently for matching.)</div>
+  <div style="font-size:12px;color:#666">(Data stored silently for matching)</div>
 </div>
 
 <div class="card">
-  <h2>Step 2: OCR New Water Bills</h2>
-  <div class="row-flex">
-    <label class="btn secondary col">
-      Upload Photo(s)
+  <h2 style="display:flex;justify-content:space-between;align-items:center;">
+    Step 2: OCR New Water Bills
+    <button id="toggleDebug" class="btn secondary">Show Debug</button>
+  </h2>
+  <div>
+    <label class="btn secondary">Upload Photos
       <input type="file" id="fileInput" accept="image/*" multiple hidden>
     </label>
-    <label class="btn secondary col">
-      Take Photo
+    <label class="btn secondary">Take Photo
       <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
     </label>
-    <button id="clearBtn" class="btn secondary col">Clear</button>
-    <button id="exportBtn" class="btn primary col">Export to Excel</button>
+    <button id="clearBtn" class="btn secondary">Clear</button>
+    <button id="exportBtn" class="btn primary">Export to Excel</button>
   </div>
   <div id="status" style="margin-top:10px;color:#555"></div>
   <table>
     <thead><tr>
-      <th>Preview</th><th>Name</th><th>Meter No. (Prev)</th><th>Meter No. (OCR)</th>
-      <th>Prev Consumption</th><th>Current Consumption (OCR)</th><th>% Difference</th>
+      <th>Preview</th><th>Name</th><th>Meter No. (Prev)</th><th>Prev Consumption</th>
+      <th>Meter No. (OCR)</th><th>Current Consumption (OCR)</th><th>% Difference</th>
     </tr></thead>
     <tbody id="results"></tbody>
   </table>
-  <div id="debug" style="display:none"><h3>Debug</h3><pre class="log" id="debugLog"></pre></div>
+  <div id="debug"><h3>Debug</h3><pre class="log" id="debugLog"></pre></div>
 </div>
 
 <script>
-/* Utilities */
-function getBBox(obj){
-  if(!obj) return null;
-  if(obj.bbox && typeof obj.bbox === 'object'){
-    const b = obj.bbox;
-    return { x0: (b.x0 ?? b.x1 - (b.x1-b.x0)), y0: (b.y0 ?? b.y1 - (b.y1-b.y0)), x1: b.x1 ?? b.x0, y1: b.y1 ?? b.y0 };
-  }
-  if(obj.x0 !== undefined && obj.y0 !== undefined){
-    return { x0: obj.x0, y0: obj.y0, x1: obj.x1, y1: obj.y1 };
-  }
-  if(obj.left !== undefined && obj.top !== undefined){
-    return { x0: obj.left, y0: obj.top, x1: obj.left + (obj.width||0), y1: obj.top + (obj.height||0) };
-  }
-  return null;
-}
-
 function cleanMeter(s){
   if(!s) return '';
   return s.toString().replace(/[^A-Z0-9\-]/ig,'').toUpperCase().trim();
 }
-
 function calcDiff(prev, curr){
   const pn = parseFloat(prev);
   const cn = parseFloat(curr);
@@ -102,14 +85,11 @@ function calcDiff(prev, curr){
   return diff > 30 ? {text:rounded, cls:"diff-red"} : {text:rounded, cls:"diff-green"};
 }
 
-/* Prev data handling */
-const prevExcelInput = document.getElementById('prevExcel');
-const prevStatus = document.getElementById('prevStatus');
-let prevData = []; // array of original rows
-let prevMap = {};  // map cleanedMeter -> row
-let prevMapLast6 = {}; // map last6 -> row
+let prevData = [];
+let prevMap = {};
+let prevMapLast6 = {};
 
-prevExcelInput.addEventListener('change', e=>{
+document.getElementById('prevExcel').addEventListener('change', e=>{
   const file = e.target.files[0];
   if(!file) return;
   const reader = new FileReader();
@@ -119,287 +99,111 @@ prevExcelInput.addEventListener('change', e=>{
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const json = XLSX.utils.sheet_to_json(sheet);
     prevData = json.map(r => {
-      // normalize keys (case-insensitive)
-      const Name = r.Name || r.name || r['Account Name'] || r['Account'] || '';
-      const Meter = r['Meter No.'] || r['Meter No'] || r['MeterNo'] || r['Meter'] || r['Meter No.'] || r['METER NO'] || r['Meter No '] || '';
-      const Cons = r.Consumption || r['Consumption Qty'] || r['Qty'] || r['Consumption'] || r.consumption || r.ConsumptionQty || '';
+      const Name = r.Name || '';
+      const Meter = r['Meter No.'] || '';
+      const Cons = r.Consumption || '';
       const cleaned = cleanMeter(Meter);
-      return { raw: r, Name: Name, Meter: Meter, CleanMeter: cleaned, Consumption: Cons };
+      return { Name, Meter, CleanMeter: cleaned, Consumption: Cons };
     });
-    // build maps
-    prevMap = {};
-    prevMapLast6 = {};
+    prevMap = {}; prevMapLast6 = {};
     prevData.forEach(r=>{
       if(r.CleanMeter) prevMap[r.CleanMeter] = r;
-      const last6 = r.CleanMeter ? r.CleanMeter.replace(/[^0-9]/g,'').slice(-6) : null;
+      const last6 = r.CleanMeter.replace(/[^0-9]/g,'').slice(-6);
       if(last6) prevMapLast6[last6] = prevMapLast6[last6] || r;
     });
-    prevStatus.innerText = "Loaded " + prevData.length + " previous records.";
+    document.getElementById('prevStatus').innerText = "Loaded " + prevData.length + " records.";
   };
   reader.readAsArrayBuffer(file);
 });
 
-/* OCR spatial extraction */
-
-function buildWordObjects(words){
-  if(!words) return [];
-  return words.map(w=> {
-    const bbox = getBBox(w) || {x0:0,y0:0,x1:0,y1:0};
-    const cx = (bbox.x0 + bbox.x1)/2;
-    const cy = (bbox.y0 + bbox.y1)/2;
-    return { text: (w.text||'').trim(), bbox, cx, cy, w };
-  }).filter(x=>x.text && x.text.length);
-}
-
-function findLabelBBoxByTokens(words, tokens){
-  // tokens: array of strings or regex to appear consecutively (case-insensitive)
-  for(let i=0;i<words.length;i++){
-    let match = true;
-    for(let j=0;j<tokens.length;j++){
-      const idx = i+j;
-      if(idx >= words.length){ match = false; break; }
-      const tok = tokens[j];
-      const txt = words[idx].text;
-      if(typeof tok === 'string'){
-        if(txt.toLowerCase() !== tok.toLowerCase()){ match = false; break; }
-      } else if(tok instanceof RegExp){
-        if(!tok.test(txt)){ match = false; break; }
-      }
-    }
-    if(match){
-      // compute bbox union of matched tokens
-      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      for(let j=0;j<tokens.length;j++){
-        const b = words[i+j].bbox;
-        x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0); x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1);
-      }
-      return { x0, y0, x1, y1, index: i };
-    }
-  }
-  return null;
-}
-
-function findNearestBelow(words, labelBBox, patternRegex){
-  // find candidate words with cy > labelBBox.y1 and whose cx within label bbox X range +/- margin
-  const marginX = Math.max(30, (labelBBox.x1 - labelBBox.x0) * 1.5);
-  const candidates = words.filter(w => (w.cy > labelBBox.y1) );
-  // sort by vertical distance
-  candidates.sort((a,b) => (a.bbox.y0 - labelBBox.y1) - (b.bbox.y0 - labelBBox.y1));
-  // prefer those horizontally near label
-  for(const c of candidates){
-    const inX = (c.bbox.x0 >= labelBBox.x0 - marginX) && (c.bbox.x1 <= labelBBox.x1 + marginX);
-    if(patternRegex.test(c.text) && inX) return c.text;
-  }
-  // if none matched with inX, try any candidate matching regex
-  for(const c of candidates){
-    if(patternRegex.test(c.text)) return c.text;
-  }
-  // else return first candidate's text if exists
-  if(candidates.length) return candidates[0].text;
-  return null;
-}
-
-function extractMeterFromData(data){
-  // prefer data.words
-  const wordsRaw = data.words || [];
-  const words = buildWordObjects(wordsRaw);
-  // try finding label tokens "Meter" + "No" or "Meter No."
-  let label = findLabelBBoxByTokens(words, [/^Meter$/i, /^No\.?$/i]) || findLabelBBoxByTokens(words, [/^Metering$/i]) || findLabelBBoxByTokens(words, [/^Meter/i]);
-  // also try lines
-  if(!label && data.lines && data.lines.length){
-    for(const l of data.lines){
-      if(/Meter\s*No|Metering/i.test(l.text)){
-        const b = getBBox(l) || {x0:0,y0:0,x1:0,y1:0};
-        label = {x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1, index:0};
-        break;
-      }
-    }
-  }
-  // meter pattern regex
-  const meterRegexes = [/AJP[^\s,]*/i, /[A-Z]{2,3}-\d{1,2}-\d{1,2}-\d{3,}/i, /[A-Z0-9\-]{6,}/i];
-  if(label){
-    for(const rg of meterRegexes){
-      const found = findNearestBelow(words, label, rg);
-      if(found) return cleanMeter(found);
-    }
-    // fallback: nearest below any text
-    const fallback = findNearestBelow(words, label, /.+/);
-    if(fallback) return cleanMeter(fallback);
-  } else {
-    // no label: search anywhere for AJP or pattern
-    for(const rg of meterRegexes){
-      for(const w of words){
-        if(rg.test(w.text)) return cleanMeter(w.text);
-      }
-    }
-  }
-  return "Not Found";
-}
-
-function extractConsumptionFromData(data){
-  const wordsRaw = data.words || [];
-  const words = buildWordObjects(wordsRaw);
-  // find Qty/Consumption label
-  let label = findLabelBBoxByTokens(words, [/^QTY$/i]) || findLabelBBoxByTokens(words, [/^Qty$/i]) || findLabelBBoxByTokens(words, [/^Consumption$/i]) || findLabelBBoxByTokens(words, [/^Consumption\s*Qty$/i]);
-  if(!label && data.lines && data.lines.length){
-    for(const l of data.lines){
-      if(/Qty|Quantity|Consumption/i.test(l.text)){
-        const b = getBBox(l) || {x0:0,y0:0,x1:0,y1:0};
-        label = {x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1, index:0};
-        break;
-      }
-    }
-  }
-  if(label){
-    // numeric pattern
-    const numRegex = /[\d,]+(?:\.\d+)?/;
-    const found = findNearestBelow(words, label, numRegex);
-    if(found) return (found||'').replace(/,/g,'').trim();
-  } else {
-    // fallback: search for small integer tokens likely consumption (1-4 digits)
-    for(const w of words){
-      const m = w.text.match(/^\d{1,4}$/);
-      if(m) return m[0];
-    }
-  }
-  return "Not Found";
-}
-
-/* Main flow */
-
-const fileInput = document.getElementById('fileInput');
-const cameraInput = document.getElementById('cameraInput');
 const resultsTable = document.getElementById('results');
-const statusDiv = document.getElementById('status');
-const exportBtn = document.getElementById('exportBtn');
-const clearBtn = document.getElementById('clearBtn');
-const debugLog = document.getElementById('debugLog');
-
 let results = [];
 
-function setStatus(msg, loading=false){
-  statusDiv.innerHTML = loading ? msg + ' <span class="spinner"></span>' : msg;
+function addRow(preview, meterOCR, consumptionOCR, rawText){
+  let name = "Not Found", meterPrev = "Not Found", prevCons = "Not Found";
+  const cleanedOCR = cleanMeter(meterOCR);
+  if(cleanedOCR && prevMap[cleanedOCR]){
+    const found = prevMap[cleanedOCR];
+    name = found.Name; meterPrev = found.Meter; prevCons = found.Consumption;
+  } else {
+    const digits = cleanedOCR.replace(/[^0-9]/g,'');
+    const last6 = digits.slice(-6);
+    if(last6 && prevMapLast6[last6]){
+      const found = prevMapLast6[last6];
+      name = found.Name; meterPrev = found.Meter; prevCons = found.Consumption;
+    }
+  }
+  const diffObj = calcDiff(prevCons, consumptionOCR);
+  const row = {preview, name, meterPrev, prevCons, meterOCR, consumptionOCR, diffObj, rawText};
+  results.push(row);
+  renderResults();
 }
 
-function fileToDataURL(file){
-  return new Promise((resolve,reject)=>{
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+function renderResults(){
+  resultsTable.innerHTML = '';
+  results.forEach((r,i)=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><img class="thumb" src="${r.preview}" /></td>
+      <td>${r.name || "Not Found"}</td>
+      <td>${r.meterPrev || "Not Found"}</td>
+      <td>${r.prevCons || "Not Found"}</td>
+      <td><input class="editable" data-row="${i}" data-field="meterOCR" value="${r.meterOCR}"></td>
+      <td><input class="editable" data-row="${i}" data-field="consumptionOCR" value="${r.consumptionOCR}"></td>
+      <td class="${r.diffObj.cls}">${r.diffObj.text}</td>`;
+    resultsTable.appendChild(tr);
+  });
+  attachEditHandlers();
+}
+
+function attachEditHandlers(){
+  document.querySelectorAll('input.editable').forEach(inp=>{
+    inp.addEventListener('input', e=>{
+      const rowIndex = e.target.dataset.row;
+      const field = e.target.dataset.field;
+      results[rowIndex][field] = e.target.value;
+      e.target.classList.add('edited');
+      if(field === 'meterOCR'){
+        const cleanedOCR = cleanMeter(e.target.value);
+        let name = "Not Found", meterPrev = "Not Found", prevCons = "Not Found";
+        if(cleanedOCR && prevMap[cleanedOCR]){
+          const found = prevMap[cleanedOCR];
+          name = found.Name; meterPrev = found.Meter; prevCons = found.Consumption;
+        } else {
+          const digits = cleanedOCR.replace(/[^0-9]/g,'');
+          const last6 = digits.slice(-6);
+          if(last6 && prevMapLast6[last6]){
+            const found = prevMapLast6[last6];
+            name = found.Name; meterPrev = found.Meter; prevCons = found.Consumption;
+          }
+        }
+        results[rowIndex].name = name;
+        results[rowIndex].meterPrev = meterPrev;
+        results[rowIndex].prevCons = prevCons;
+      }
+      results[rowIndex].diffObj = calcDiff(results[rowIndex].prevCons, results[rowIndex].consumptionOCR);
+      renderResults();
+    });
   });
 }
 
-async function processFile(file){
-  try{
-    const rawDataURL = await fileToDataURL(file);
-    setStatus("Processing " + file.name, true);
+document.getElementById('toggleDebug').addEventListener('click', ()=>{
+  const dbg = document.getElementById('debug');
+  if(dbg.style.display==='none'){ dbg.style.display='block'; document.getElementById('toggleDebug').innerText="Hide Debug"; }
+  else{ dbg.style.display='none'; document.getElementById('toggleDebug').innerText="Show Debug"; }
+});
 
-    // Recognize: use direct on iOS, worker on desktop for best compatibility
-    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-    let res = null;
-    if(isIOS){
-      const { recognize } = Tesseract;
-      res = await recognize(rawDataURL, 'eng', { logger: m=>{ if(m.status==='recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true);} });
-    } else {
-      const { createWorker } = Tesseract;
-      const worker = await createWorker({ logger: m=>{ if(m.status==='recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true);} });
-      await worker.loadLanguage('eng');
-      await worker.initialize('eng');
-      const r = await worker.recognize(rawDataURL);
-      res = r;
-      await worker.terminate();
-    }
+document.getElementById('clearBtn').addEventListener('click', ()=>{
+  results=[]; resultsTable.innerHTML='';
+});
 
-    const data = res && res.data ? res.data : {};
-    // extract using spatial logic
-    const meterOCR = extractMeterFromData(data) || "Not Found";
-    const consumptionOCR = extractConsumptionFromData(data) || "Not Found";
-
-    // matching with prevData using cleaned keys and fallback last6 digits
-    let name = "⚠️ Not Found", meterPrev = "⚠️ Not Found", prevCons = "⚠️ Not Found";
-    const cleanedOCR = cleanMeter(meterOCR);
-    if(cleanedOCR && prevMap[cleanedOCR]){
-      const found = prevMap[cleanedOCR];
-      name = found.Name || '';
-      meterPrev = found.Meter || '';
-      prevCons = found.Consumption || '';
-    } else {
-      // fallback last 6 digits match
-      const digits = cleanedOCR.replace(/[^0-9]/g,'');
-      const last6 = digits.slice(-6);
-      if(last6 && prevMapLast6[last6]){
-        const found = prevMapLast6[last6];
-        name = found.Name || '';
-        meterPrev = found.Meter || '';
-        prevCons = found.Consumption || '';
-      }
-    }
-
-    const diffObj = calcDiff(prevCons, consumptionOCR);
-    const preview = rawDataURL; // using dataURL as preview
-
-    const row = { preview, name, meterPrev, meterOCR, prevCons, consumptionOCR, diffText: diffObj.text, diffClass: diffObj.cls };
-    results.push(row);
-
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td><img class="thumb" src="${preview}" alt="preview"></td>
-                    <td>${name.includes("⚠️")? "<span class='warn'>"+name+"</span>" : name}</td>
-                    <td>${meterPrev.includes("⚠️")? "<span class='warn'>"+meterPrev+"</span>" : meterPrev}</td>
-                    <td>${meterOCR}</td>
-                    <td>${prevCons.includes("⚠️")? "<span class='warn'>"+prevCons+"</span>" : prevCons}</td>
-                    <td>${consumptionOCR}</td>
-                    <td class="${diffObj.cls}">${diffObj.text}</td>`;
-    resultsTable.appendChild(tr);
-
-    // debug log
-    if(debugLog){
-      const dbg = [
-        "=== OCR DEBUG: " + file.name,
-        "OCR raw text preview:",
-        (data.text||'').slice(0,800),
-        "Detected meterOCR: " + meterOCR,
-        "Detected consumptionOCR: " + consumptionOCR,
-        "Matched previous: " + (name && !name.startsWith('⚠️') ? JSON.stringify({name,meterPrev,prevCons}) : 'No'),
-        ""
-      ].join("\n");
-      debugLog.textContent = (debugLog.textContent || "") + dbg + "\n\n";
-    }
-
-    setStatus("Done processing " + file.name, false);
-  } catch(err){
-    console.error("Error processing file", err);
-    setStatus("Error processing " + file.name, false);
-  }
-}
-
-async function processFiles(files){
-  for(const f of files){
-    await processFile(f);
-  }
-  setStatus("All done", false);
-}
-
-fileInput.addEventListener('change', e => { const files = Array.from(e.target.files || []); if(files.length) processFiles(files); });
-cameraInput.addEventListener('change', e => { const files = Array.from(e.target.files || []); if(files.length) processFiles(files); });
-
-exportBtn.addEventListener('click', ()=>{
-  if(!results.length){ alert('No data to export'); return; }
-  // Export only Name, Meter No. (Prev), Current Consumption
-  const exportData = results.map(r=>({ Name: r.name, "Meter No.": r.meterPrev, "Current Consumption": r.consumptionOCR }));
+document.getElementById('exportBtn').addEventListener('click', ()=>{
+  if(!results.length){ alert('No data'); return; }
+  const exportData = results.map(r=>({ Name:r.name, "Meter No.":r.meterPrev, "Current Consumption":r.consumptionOCR }));
   const ws = XLSX.utils.json_to_sheet(exportData);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Results');
   XLSX.writeFile(wb, 'bills_results.xlsx');
-});
-
-clearBtn.addEventListener('click', ()=>{
-  document.getElementById('fileInput').value = '';
-  document.getElementById('cameraInput').value = '';
-  results = [];
-  resultsTable.innerHTML = '';
-  setStatus('Cleared', false);
-  if(debugLog) debugLog.textContent = '';
 });
 </script>
 </body>
