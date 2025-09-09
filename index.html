@@ -3,161 +3,89 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Water Bill OCR — Improved</title>
+<title>Water Bill OCR — Combined</title>
 
-<!-- Tesseract.js v5 -->
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<!-- SheetJS -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
 
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica Neue,Arial;
-       background:#f2f6fb;margin:0;padding:18px;max-width:480px;margin:auto;}
+       background:#f2f6fb;margin:0;padding:18px;max-width:650px;margin:auto;}
   header{background:linear-gradient(135deg,#4facfe,#00f2fe);color:white;padding:18px;border-radius:14px;}
   h1{margin:0;font-size:20px;}
-  .card{background:white;padding:12px;margin-top:12px;border-radius:12px;box-shadow:0 4px 10px rgba(0,0,0,.08);}
-  .btn{padding:10px 14px;border:none;border-radius:8px;font-weight:600;font-size:15px;cursor:pointer;}
+  .card{background:white;padding:14px;margin-top:16px;border-radius:12px;box-shadow:0 4px 10px rgba(0,0,0,.08);}
+  .btn{padding:10px 14px;border:none;border-radius:8px;font-weight:600;font-size:15px;cursor:pointer;margin:4px;}
   .primary{background:#4facfe;color:white;}
   .secondary{background:#f9f9f9;color:#4facfe;border:1px solid #4facfe;}
   table{width:100%;border-collapse:collapse;font-size:14px;margin-top:10px;}
-  th,td{padding:8px;border-bottom:1px solid #eee;}
+  th,td{padding:8px;border-bottom:1px solid #eee;word-break:break-word;text-align:center;}
   th{background:#fafafa;position:sticky;top:0;}
   tr:nth-child(even){background:#fcfcfc;}
   .spinner{width:20px;height:20px;border:3px solid #ccc;border-top-color:#4facfe;border-radius:50%;
            animation:spin 1s linear infinite;display:inline-block;}
-  img.thumb{width:60px;height:auto;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,0.08);}
-  .row{display:flex;gap:10px;align-items:center}
-  .col{flex:1}
+  .warn{color:red;font-weight:bold;}
+  .diff-red{color:red;font-weight:bold;}
+  .diff-green{color:green;font-weight:bold;}
+  .diff-gray{color:gray;}
 </style>
 </head>
 <body>
 <header>
-  <h1>📄 Water Bill OCR</h1>
-  <p>Improved extraction: picks value **below** the label (Meter No. / Qty).</p>
+  <h1>📄 Water Bill OCR (With Validation & % Difference)</h1>
+  <p>Step 1: Upload past Excel, Step 2: Scan new bills and compare results.</p>
 </header>
 
 <div class="card">
-  <input type="file" id="fileInput" accept="image/*" multiple>
-  <button id="clearBtn" class="btn secondary">Clear</button>
-  <button id="exportBtn" class="btn primary">Export to Excel</button>
-  <div id="status" style="margin-top:10px;color:#555"></div>
+  <h2>Step 1: Upload Previous Water Bill Excel</h2>
+  <input type="file" id="prevExcel" accept=".xlsx,.xls" />
+  <div id="prevStatus" style="margin-top:10px;color:#555"></div>
 </div>
 
 <div class="card">
+  <h2>Step 2: OCR New Water Bills</h2>
+  <label class="btn secondary">
+    Upload Photo(s)
+    <input type="file" id="fileInput" accept="image/*" multiple hidden>
+  </label>
+  <label class="btn secondary">
+    Take Photo
+    <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
+  </label>
+  <button id="clearBtn" class="btn secondary">Clear</button>
+  <button id="exportBtn" class="btn primary">Export to Excel</button>
+  <div id="status" style="margin-top:10px;color:#555"></div>
   <table>
-    <thead><tr><th>Preview</th><th>File</th><th>Meter No.</th><th>Consumption</th></tr></thead>
+    <thead><tr>
+      <th>Name</th><th>Meter No. (Prev)</th><th>Meter No. (OCR)</th>
+      <th>Prev Consumption</th><th>Current Consumption (OCR)</th><th>% Difference</th>
+    </tr></thead>
     <tbody id="results"></tbody>
   </table>
 </div>
 
 <script>
-/* Utilities to get bbox from Tesseract structures */
-function getBBox(obj){
-  if(!obj) return null;
-  if(obj.bbox){
-    // tesseract v5: bbox usually has x0,y0,x1,y1
-    return {x0: obj.bbox.x0, y0: obj.bbox.y0, x1: obj.bbox.x1, y1: obj.bbox.y1};
-  }
-  // older variants
-  if(obj.x0 !== undefined && obj.y0 !== undefined){
-    return {x0: obj.x0, y0: obj.y0, x1: obj.x1, y1: obj.y1};
-  }
-  // fallback: null
-  return null;
-}
+const prevExcelInput = document.getElementById('prevExcel');
+const prevStatus = document.getElementById('prevStatus');
+let prevData = [];
 
-/* Build line objects from words if lines are not provided */
-function buildLinesFromWords(words){
-  if(!words || !words.length) return [];
-  const items = words.map(w => {
-    const bbox = getBBox(w) || {x0:0,y0:0,x1:0,y1:0};
-    const cy = (bbox.y0 + bbox.y1) / 2;
-    return { text: w.text || '', bbox, cy };
-  }).filter(it => it.text && it.text.trim().length);
-  // sort by cy
-  items.sort((a,b) => a.cy - b.cy);
-  const lines = [];
-  const TH = 10; // pixels threshold grouping
-  for(const it of items){
-    if(!lines.length) { lines.push({ words: [it], cy: it.cy }); continue; }
-    const last = lines[lines.length-1];
-    if(Math.abs(it.cy - last.cy) <= TH){
-      last.words.push(it);
-      last.cy = (last.cy * (last.words.length -1) + it.cy) / last.words.length;
-    } else {
-      lines.push({ words: [it], cy: it.cy });
-    }
-  }
-  // convert to line objects
-  return lines.map(line => {
-    const text = line.words.map(w => w.text).join(' ');
-    const x0 = Math.min(...line.words.map(w => w.bbox.x0));
-    const y0 = Math.min(...line.words.map(w => w.bbox.y0));
-    const x1 = Math.max(...line.words.map(w => w.bbox.x1));
-    const y1 = Math.max(...line.words.map(w => w.bbox.y1));
-    return { text, bbox: { x0,y0,x1,y1 }, cy: line.cy };
-  });
-}
+prevExcelInput.addEventListener('change', e => {
+  const file = e.target.files[0];
+  if(!file){ return; }
+  const reader = new FileReader();
+  reader.onload = (evt)=>{
+    const data = new Uint8Array(evt.target.result);
+    const workbook = XLSX.read(data, {type:'array'});
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const json = XLSX.utils.sheet_to_json(sheet);
+    prevData = json;
+    prevStatus.innerText = "Loaded " + json.length + " records from previous Excel.";
+  };
+  reader.readAsArrayBuffer(file);
+});
 
-/* Find the first line matching label regex */
-function findLabelLine(lines, regex){
-  for(let i=0;i<lines.length;i++){
-    if(regex.test(lines[i].text)) return {line: lines[i], index: i};
-  }
-  return null;
-}
-
-/* Candidate extraction below label: look at next few lines */
-function extractValueBelow(lines, labelRegex, valueMatchers){
-  const found = findLabelLine(lines, labelRegex);
-  if(found){
-    const start = found.index + 1;
-    for(let i=start;i<Math.min(lines.length, start+3); i++){
-      const lineText = lines[i].text;
-      for(const vm of valueMatchers){
-        const m = lineText.match(vm);
-        if(m) return m[1] || m[0];
-      }
-    }
-    // if nothing matched in next lines, return the next line raw trimmed
-    if(start < lines.length) return lines[start].text.trim();
-  }
-  return null;
-}
-
-/* Global fallback search for meter pattern anywhere */
-function findMeterByPattern(lines){
-  const patterns = [
-    /([A-Z]{2,3}-\d{1,2}-\d{1,2}-\d{3,})/i,
-    /([A-Z]{2,}[A-Z0-9\-\s]{3,})/i,
-    /(AJP[^\s,]+)/i
-  ];
-  for(const line of lines){
-    for(const p of patterns){
-      const m = line.text.match(p);
-      if(m) return m[1] || m[0];
-    }
-  }
-  // try words fallback (numbers+letters)
-  for(const line of lines){
-    const m = line.text.match(/\b([A-Z0-9\-]{6,})\b/);
-    if(m) return m[1];
-  }
-  return null;
-}
-
-/* Extract consumption globally fallback */
-function findConsumptionByPattern(lines){
-  for(const line of lines){
-    const m = line.text.match(/(\d{1,5})/);
-    if(m) return m[1];
-  }
-  return null;
-}
-
-
-/* Main app logic */
+// Step 2 (OCR part)
 const fileInput = document.getElementById('fileInput');
+const cameraInput = document.getElementById('cameraInput');
 const resultsTable = document.getElementById('results');
 const statusDiv = document.getElementById('status');
 const exportBtn = document.getElementById('exportBtn');
@@ -177,128 +105,77 @@ function fileToDataURL(file){
   });
 }
 
-function resizeImageDataURL(dataURL, maxWidth=1000){
-  return new Promise((resolve)=>{
-    const img = new Image();
-    img.onload = () => {
-      const scale = Math.min(1, maxWidth / img.width);
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      resolve(canvas.toDataURL('image/jpeg', 0.8));
-    };
-    img.src = dataURL;
-  });
+function calcDiff(prev, curr){
+  if(!prev || isNaN(prev) || prev == 0 || !curr || isNaN(curr)) return {text:"—", cls:"diff-gray"};
+  const diff = ((curr - prev)/prev)*100;
+  const rounded = diff.toFixed(1) + "%";
+  if(diff > 30){ return {text: rounded, cls:"diff-red"}; }
+  else{ return {text: rounded, cls:"diff-green"}; }
 }
 
-function addResultRow(previewDataURL, fileName, meterNo, consumption){
-  const tr = document.createElement('tr');
-  tr.innerHTML = `<td><img class="thumb" src="${previewDataURL}" alt="preview"></td>
-                  <td>${fileName}</td>
-                  <td>${meterNo}</td>
-                  <td>${consumption}</td>`;
-  resultsTable.appendChild(tr);
-}
+async function processFiles(files){
+  for (const file of files){
+    const rawDataURL = await fileToDataURL(file);
+    setStatus("Processing " + file.name, true);
 
-const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    const { recognize } = Tesseract;
+    const res = await recognize(rawDataURL, 'eng');
+    const text = res.data.text;
+    let meterOCR = "Not Found", consumptionOCR = "Not Found";
 
-fileInput.addEventListener('change', async (e) => {
-  const files = Array.from(e.target.files);
-  results = [];
-  resultsTable.innerHTML = '';
-  if (!files.length) return;
-  setStatus('Starting OCR...', true);
+    const meterMatch = text.match(/(?:Meter\s*No\.?\s*[\n\r ]*)([A-Z0-9\-]+)/i) || text.match(/(AJP[^\s]+)/i);
+    if(meterMatch) meterOCR = meterMatch[1] || meterMatch[0];
 
-  for (let i = 0; i < files.length; i++){
-    const file = files[i];
-    try{
-      setStatus(`Preparing ${file.name} (${i+1}/${files.length})`, true);
-      const rawDataURL = await fileToDataURL(file);
-      const previewDataURL = await resizeImageDataURL(rawDataURL, 600);
-      // resize for OCR too
-      const ocrDataURL = await resizeImageDataURL(rawDataURL, 1000);
+    const consMatch = text.match(/(?:Qty\s*[\n\r ]*)(\d+)/i);
+    if(consMatch) consumptionOCR = consMatch[1];
 
-      setStatus(`Processing ${file.name} (${i+1}/${files.length})`, true);
-
-      let res = null;
-      if (isIOS){
-        // direct mode
-        const { recognize } = Tesseract;
-        res = await recognize(ocrDataURL, 'eng', {
-          logger: m => {
-            if (m.status === 'recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true);
-          }
-        });
-        // res.data should contain lines/words
-      } else {
-        // worker mode (desktop)
-        const { createWorker } = Tesseract;
-        const worker = await createWorker({
-          logger: m => {
-            if (m.status === 'recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true);
-          }
-        });
-        await worker.loadLanguage('eng');
-        await worker.initialize('eng');
-        await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-' });
-        const r = await worker.recognize(ocrDataURL);
-        res = r;
-        await worker.terminate();
+    // Validation against Step 1
+    let name = "⚠️ Not Found";
+    let meterPrev = "⚠️ Not Found";
+    let prevCons = "⚠️ Not Found";
+    if(prevData.length > 0){
+      const found = prevData.find(r => (r["Meter No."] || "").toString().trim() === meterOCR.trim());
+      if(found){
+        name = found.Name || "";
+        meterPrev = found["Meter No."] || "";
+        prevCons = found.Consumption || "";
       }
-
-      const data = res && res.data ? res.data : {};
-      let lines = data.lines && data.lines.length ? data.lines.map(l => ({ text: l.text, bbox: getBBox(l), cy: (getBBox(l).y0+getBBox(l).y1)/2 })) : null;
-      if(!lines || !lines.length){
-        // build from words
-        const words = data.words || [];
-        lines = buildLinesFromWords(words);
-      } else {
-        // ensure sorted by vertical position
-        lines.sort((a,b) => a.bbox.y0 - b.bbox.y0);
-      }
-
-      // Attempt spatial extraction
-      const meterLabelRegex = /Meter\s*No\.?|Meter\s*Number|METER\s*NO/i;
-      const qtyLabelRegex = /Qty|Quantity|Consumption\s*Qty|Consumption/i;
-
-      let meter = extractValueBelow(lines, meterLabelRegex, [
-        /([A-Z]{2,3}-\d{1,2}-\d{1,2}-\d{3,})/i,
-        /(AJP[^\s,]+)/i,
-        /([A-Z0-9\-]{6,})/i
-      ]);
-
-      let consumption = extractValueBelow(lines, qtyLabelRegex, [
-        /(\d{1,5})/i
-      ]);
-
-      // Global fallbacks
-      if(!meter || meter === null) meter = findMeterByPattern(lines) || 'Not Found';
-      if(!consumption || consumption === null) consumption = findConsumptionByPattern(lines) || 'Not Found';
-
-      results.push({ fileName: file.name, meterNo: meter, consumption: consumption });
-      addResultRow(previewDataURL, file.name, meter, consumption);
-    } catch(err){
-      console.error('OCR error', err);
-      results.push({ fileName: file.name, meterNo: 'Error', consumption: 'Error' });
-      addResultRow('', file.name, 'Error', 'Error');
     }
-  }
 
-  setStatus(`Done — ${results.length} file(s) processed`, false);
-});
+    const prevNum = parseFloat(prevCons);
+    const currNum = parseFloat(consumptionOCR);
+    const diffObj = calcDiff(prevNum, currNum);
+
+    const row = { name, meterPrev, meterOCR, prevCons, consumptionOCR, diff: diffObj.text };
+    results.push(row);
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${name.includes("⚠️") ? "<span class='warn'>"+name+"</span>" : name}</td>
+                    <td>${meterPrev.includes("⚠️") ? "<span class='warn'>"+meterPrev+"</span>" : meterPrev}</td>
+                    <td>${meterOCR}</td>
+                    <td>${prevCons.includes("⚠️") ? "<span class='warn'>"+prevCons+"</span>" : prevCons}</td>
+                    <td>${consumptionOCR}</td>
+                    <td class='${diffObj.cls}'>${diffObj.text}</td>`;
+    resultsTable.appendChild(tr);
+  }
+  setStatus("Done");
+}
+
+fileInput.addEventListener('change', e => processFiles(e.target.files));
+cameraInput.addEventListener('change', e => processFiles(e.target.files));
 
 exportBtn.addEventListener('click', ()=>{
   if(!results.length){ alert('No data to export'); return; }
-  const ws = XLSX.utils.json_to_sheet(results.map(r=>({ 'File Name': r.fileName, 'Meter No': r.meterNo, 'Consumption Qty': r.consumption })));
+  const exportData = results.map(r=>({ Name: r.name, "Meter No.": r.meterPrev, "Current Consumption": r.consumptionOCR }));
+  const ws = XLSX.utils.json_to_sheet(exportData);
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Bills');
-  XLSX.writeFile(wb, 'bills.xlsx');
+  XLSX.utils.book_append_sheet(wb, ws, 'Results');
+  XLSX.writeFile(wb, 'bills_results.xlsx');
 });
 
 clearBtn.addEventListener('click', ()=>{
   fileInput.value = '';
+  cameraInput.value = '';
   results = [];
   resultsTable.innerHTML = '';
   setStatus('Cleared', false);
