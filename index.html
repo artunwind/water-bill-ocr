@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Water Bill OCR — Spatial Extraction</title>
+<title>Water Bill OCR — Improved Matching</title>
 
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
 
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica Neue,Arial;
-       background:#f2f6fb;margin:0;padding:18px;max-width:700px;margin:auto;}
+       background:#f2f6fb;margin:0;padding:18px;max-width:720px;margin:auto;}
   header{background:linear-gradient(135deg,#4facfe,#00f2fe);color:white;padding:18px;border-radius:14px;}
   h1{margin:0;font-size:20px;}
   .card{background:white;padding:14px;margin-top:16px;border-radius:12px;box-shadow:0 4px 10px rgba(0,0,0,.08);}
@@ -30,18 +30,20 @@
   img.thumb{width:64px;height:auto;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,0.08);}
   .row-flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
   .col{flex:1;min-width:120px;}
+  pre.log{white-space:pre-wrap;background:#fff;border-radius:8px;padding:8px;margin-top:8px;font-size:12px;color:#333}
 </style>
 </head>
 <body>
 <header>
-  <h1>📄 Water Bill OCR (Spatial Extraction)</h1>
-  <p>Step 1: Upload previous readings. Step 2: Scan bills — we extract values located <strong>below</strong> the labels.</p>
+  <h1>📄 Water Bill OCR (Improved)</h1>
+  <p>Spatial extraction + robust matching between Step 1 and OCR results.</p>
 </header>
 
 <div class="card">
-  <h2>Step 1: Upload Previous Water Bill Excel</h2>
+  <h2>Step 1: Upload Previous Water Bill Excel (hidden table)</h2>
   <input type="file" id="prevExcel" accept=".xlsx,.xls" />
   <div id="prevStatus" style="margin-top:10px;color:#555"></div>
+  <div style="font-size:12px;color:#666">(We store the previous readings silently for matching.)</div>
 </div>
 
 <div class="card">
@@ -66,17 +68,16 @@
     </tr></thead>
     <tbody id="results"></tbody>
   </table>
+  <div id="debug" style="display:none"><h3>Debug</h3><pre class="log" id="debugLog"></pre></div>
 </div>
 
 <script>
-/* Spatial OCR extraction functions */
-
+/* Utilities */
 function getBBox(obj){
   if(!obj) return null;
-  // tesseract v5 uses bbox with x0,y0,x1,y1 or bbox property
   if(obj.bbox && typeof obj.bbox === 'object'){
     const b = obj.bbox;
-    return { x0: b.x0 ?? b.x1 - (b.x1-b.x0), y0: b.y0 ?? b.y1 - (b.y1-b.y0), x1: b.x1 ?? b.x0, y1: b.y1 ?? b.y0 };
+    return { x0: (b.x0 ?? b.x1 - (b.x1-b.x0)), y0: (b.y0 ?? b.y1 - (b.y1-b.y0)), x1: b.x1 ?? b.x0, y1: b.y1 ?? b.y0 };
   }
   if(obj.x0 !== undefined && obj.y0 !== undefined){
     return { x0: obj.x0, y0: obj.y0, x1: obj.x1, y1: obj.y1 };
@@ -87,152 +88,184 @@ function getBBox(obj){
   return null;
 }
 
-function buildLinesFromWords(words){
-  if(!words || !words.length) return [];
-  const items = words.map(w => {
-    const bbox = getBBox(w) || {x0:0,y0:0,x1:0,y1:0};
-    const cy = (bbox.y0 + bbox.y1) / 2;
-    return { text: (w.text||'').trim(), bbox, cy, h: bbox.y1 - bbox.y0 };
-  }).filter(it => it.text && it.text.length);
-  if(!items.length) return [];
-  // sort by vertical position
-  items.sort((a,b) => a.cy - b.cy);
-  // compute median height
-  const heights = items.map(i=>i.h).filter(h=>h>0);
-  let medianH = 10;
-  if(heights.length){
-    heights.sort((a,b)=>a-b);
-    medianH = heights[Math.floor(heights.length/2)];
-  }
-  const TH = Math.max(8, Math.round(medianH * 0.6));
-  const lines = [];
-  for(const it of items){
-    if(!lines.length){
-      lines.push({ words: [it], cy: it.cy });
-    } else {
-      const last = lines[lines.length-1];
-      if(Math.abs(it.cy - last.cy) <= TH){
-        last.words.push(it);
-        last.cy = (last.cy * (last.words.length-1) + it.cy) / last.words.length;
-      } else {
-        lines.push({ words: [it], cy: it.cy });
-      }
-    }
-  }
-  // convert to line objects
-  return lines.map(line => {
-    const text = line.words.map(w => w.text).join(' ');
-    const x0 = Math.min(...line.words.map(w => w.bbox.x0));
-    const y0 = Math.min(...line.words.map(w => w.bbox.y0));
-    const x1 = Math.max(...line.words.map(w => w.bbox.x1));
-    const y1 = Math.max(...line.words.map(w => w.bbox.y1));
-    return { text: text.trim(), bbox: { x0,y0,x1,y1 }, cy: line.cy };
-  });
-}
-
-function findLabelLine(lines, regex){
-  for(let i=0;i<lines.length;i++){
-    if(regex.test(lines[i].text)) return { line: lines[i], index: i };
-  }
-  return null;
-}
-
-function getNextNonEmptyLineText(lines, index){
-  for(let i=index+1;i<lines.length;i++){
-    const t = (lines[i].text||'').trim();
-    if(t) return t;
-  }
-  return null;
-}
-
-function extractMeterFromLines(lines){
-  // primary: look for 'Meter No' label then get below line and match AJP or other id patterns
-  const labelRegex = /Meter\s*No\.?|Meter\s*Number|METER\s*NO/i;
-  const found = findLabelLine(lines, labelRegex);
-  if(found){
-    const below = getNextNonEmptyLineText(lines, found.index);
-    if(below){
-      // try to find pattern starting with AJP
-      let m = below.match(/(AJP[^\s,]+)/i);
-      if(m) return cleanMeter(m[1]);
-      // pattern like AJP-15-24-391727 or other alnum-hyphen
-      m = below.match(/([A-Z]{2,3}-\d{1,2}-\d{1,2}-\d{3,})/i);
-      if(m) return cleanMeter(m[1]);
-      // fallback: first large token
-      m = below.match(/\b([A-Z0-9\-]{5,})\b/);
-      if(m) return cleanMeter(m[1]);
-      // else return the whole line trimmed
-      return cleanMeter(below);
-    }
-  }
-  // fallback: search any line starting with AJP
-  for(const ln of lines){
-    const m = ln.text.match(/(AJP[^\s,]+)/i);
-    if(m) return cleanMeter(m[1]);
-  }
-  // global fallback token
-  for(const ln of lines){
-    const m = ln.text.match(/\b([A-Z0-9\-]{6,})\b/);
-    if(m) return cleanMeter(m[1]);
-  }
-  return "Not Found";
-}
-
 function cleanMeter(s){
-  if(!s) return s;
-  return s.replace(/[^A-Z0-9\-]/ig,'').trim();
+  if(!s) return '';
+  return s.toString().replace(/[^A-Z0-9\-]/ig,'').toUpperCase().trim();
 }
 
-function extractConsumptionFromLines(lines){
-  // find Qty label and use the next line's first integer
-  const labelRegex = /Qty|Quantity|Consumption\s*Qty|Consumption/i;
-  const found = findLabelLine(lines, labelRegex);
-  if(found){
-    const below = getNextNonEmptyLineText(lines, found.index);
-    if(below){
-      const m = below.match(/(\d{1,5})/);
-      if(m) return m[1];
-      // maybe value contains commas or decimals
-      const m2 = below.match(/([\d,]+\.\d+|[\d,]+)/);
-      if(m2) return m2[1].replace(/,/g,'');
-      return below.trim();
-    }
-  }
-  // fallback: look for nearby numbers in document
-  for(const ln of lines){
-    const m = ln.text.match(/(\d{1,5})/);
-    if(m) return m[1];
-  }
-  return "Not Found";
+function calcDiff(prev, curr){
+  const pn = parseFloat(prev);
+  const cn = parseFloat(curr);
+  if(!isFinite(pn) || pn === 0 || !isFinite(cn)) return {text:"—", cls:"diff-gray"};
+  const diff = ((cn - pn)/pn) * 100;
+  const rounded = (Math.round(diff*10)/10).toFixed(1) + "%";
+  return diff > 30 ? {text:rounded, cls:"diff-red"} : {text:rounded, cls:"diff-green"};
 }
 
-/* App UI and main flow */
-
+/* Prev data handling */
 const prevExcelInput = document.getElementById('prevExcel');
 const prevStatus = document.getElementById('prevStatus');
-let prevData = [];
+let prevData = []; // array of original rows
+let prevMap = {};  // map cleanedMeter -> row
+let prevMapLast6 = {}; // map last6 -> row
 
-prevExcelInput.addEventListener('change', e => {
+prevExcelInput.addEventListener('change', e=>{
   const file = e.target.files[0];
   if(!file) return;
   const reader = new FileReader();
-  reader.onload = evt => {
+  reader.onload = evt=>{
     const data = new Uint8Array(evt.target.result);
     const workbook = XLSX.read(data, {type:'array'});
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const json = XLSX.utils.sheet_to_json(sheet);
-    // normalize keys: accept "Name", "Meter No.", "Meter No", "Consumption", "Consumption Qty", etc.
     prevData = json.map(r => {
-      const normalized = {};
-      normalized.Name = r.Name || r.Name || r['name'] || r['Name ' ] || '';
-      normalized["Meter No."] = r['Meter No.'] || r['Meter No'] || r['MeterNo'] || r['Meter'] || r['METER NO'] || '';
-      normalized.Consumption = r['Consumption'] || r['Consumption Qty'] || r['Qty'] || r['Current'] || r['consumption'] || '';
-      return normalized;
+      // normalize keys (case-insensitive)
+      const Name = r.Name || r.name || r['Account Name'] || r['Account'] || '';
+      const Meter = r['Meter No.'] || r['Meter No'] || r['MeterNo'] || r['Meter'] || r['Meter No.'] || r['METER NO'] || r['Meter No '] || '';
+      const Cons = r.Consumption || r['Consumption Qty'] || r['Qty'] || r['Consumption'] || r.consumption || r.ConsumptionQty || '';
+      const cleaned = cleanMeter(Meter);
+      return { raw: r, Name: Name, Meter: Meter, CleanMeter: cleaned, Consumption: Cons };
     });
-    prevStatus.innerText = "Loaded " + prevData.length + " records from previous Excel.";
+    // build maps
+    prevMap = {};
+    prevMapLast6 = {};
+    prevData.forEach(r=>{
+      if(r.CleanMeter) prevMap[r.CleanMeter] = r;
+      const last6 = r.CleanMeter ? r.CleanMeter.replace(/[^0-9]/g,'').slice(-6) : null;
+      if(last6) prevMapLast6[last6] = prevMapLast6[last6] || r;
+    });
+    prevStatus.innerText = "Loaded " + prevData.length + " previous records.";
   };
   reader.readAsArrayBuffer(file);
 });
+
+/* OCR spatial extraction */
+
+function buildWordObjects(words){
+  if(!words) return [];
+  return words.map(w=> {
+    const bbox = getBBox(w) || {x0:0,y0:0,x1:0,y1:0};
+    const cx = (bbox.x0 + bbox.x1)/2;
+    const cy = (bbox.y0 + bbox.y1)/2;
+    return { text: (w.text||'').trim(), bbox, cx, cy, w };
+  }).filter(x=>x.text && x.text.length);
+}
+
+function findLabelBBoxByTokens(words, tokens){
+  // tokens: array of strings or regex to appear consecutively (case-insensitive)
+  for(let i=0;i<words.length;i++){
+    let match = true;
+    for(let j=0;j<tokens.length;j++){
+      const idx = i+j;
+      if(idx >= words.length){ match = false; break; }
+      const tok = tokens[j];
+      const txt = words[idx].text;
+      if(typeof tok === 'string'){
+        if(txt.toLowerCase() !== tok.toLowerCase()){ match = false; break; }
+      } else if(tok instanceof RegExp){
+        if(!tok.test(txt)){ match = false; break; }
+      }
+    }
+    if(match){
+      // compute bbox union of matched tokens
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for(let j=0;j<tokens.length;j++){
+        const b = words[i+j].bbox;
+        x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0); x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1);
+      }
+      return { x0, y0, x1, y1, index: i };
+    }
+  }
+  return null;
+}
+
+function findNearestBelow(words, labelBBox, patternRegex){
+  // find candidate words with cy > labelBBox.y1 and whose cx within label bbox X range +/- margin
+  const marginX = Math.max(30, (labelBBox.x1 - labelBBox.x0) * 1.5);
+  const candidates = words.filter(w => (w.cy > labelBBox.y1) );
+  // sort by vertical distance
+  candidates.sort((a,b) => (a.bbox.y0 - labelBBox.y1) - (b.bbox.y0 - labelBBox.y1));
+  // prefer those horizontally near label
+  for(const c of candidates){
+    const inX = (c.bbox.x0 >= labelBBox.x0 - marginX) && (c.bbox.x1 <= labelBBox.x1 + marginX);
+    if(patternRegex.test(c.text) && inX) return c.text;
+  }
+  // if none matched with inX, try any candidate matching regex
+  for(const c of candidates){
+    if(patternRegex.test(c.text)) return c.text;
+  }
+  // else return first candidate's text if exists
+  if(candidates.length) return candidates[0].text;
+  return null;
+}
+
+function extractMeterFromData(data){
+  // prefer data.words
+  const wordsRaw = data.words || [];
+  const words = buildWordObjects(wordsRaw);
+  // try finding label tokens "Meter" + "No" or "Meter No."
+  let label = findLabelBBoxByTokens(words, [/^Meter$/i, /^No\.?$/i]) || findLabelBBoxByTokens(words, [/^Metering$/i]) || findLabelBBoxByTokens(words, [/^Meter/i]);
+  // also try lines
+  if(!label && data.lines && data.lines.length){
+    for(const l of data.lines){
+      if(/Meter\s*No|Metering/i.test(l.text)){
+        const b = getBBox(l) || {x0:0,y0:0,x1:0,y1:0};
+        label = {x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1, index:0};
+        break;
+      }
+    }
+  }
+  // meter pattern regex
+  const meterRegexes = [/AJP[^\s,]*/i, /[A-Z]{2,3}-\d{1,2}-\d{1,2}-\d{3,}/i, /[A-Z0-9\-]{6,}/i];
+  if(label){
+    for(const rg of meterRegexes){
+      const found = findNearestBelow(words, label, rg);
+      if(found) return cleanMeter(found);
+    }
+    // fallback: nearest below any text
+    const fallback = findNearestBelow(words, label, /.+/);
+    if(fallback) return cleanMeter(fallback);
+  } else {
+    // no label: search anywhere for AJP or pattern
+    for(const rg of meterRegexes){
+      for(const w of words){
+        if(rg.test(w.text)) return cleanMeter(w.text);
+      }
+    }
+  }
+  return "Not Found";
+}
+
+function extractConsumptionFromData(data){
+  const wordsRaw = data.words || [];
+  const words = buildWordObjects(wordsRaw);
+  // find Qty/Consumption label
+  let label = findLabelBBoxByTokens(words, [/^QTY$/i]) || findLabelBBoxByTokens(words, [/^Qty$/i]) || findLabelBBoxByTokens(words, [/^Consumption$/i]) || findLabelBBoxByTokens(words, [/^Consumption\s*Qty$/i]);
+  if(!label && data.lines && data.lines.length){
+    for(const l of data.lines){
+      if(/Qty|Quantity|Consumption/i.test(l.text)){
+        const b = getBBox(l) || {x0:0,y0:0,x1:0,y1:0};
+        label = {x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1, index:0};
+        break;
+      }
+    }
+  }
+  if(label){
+    // numeric pattern
+    const numRegex = /[\d,]+(?:\.\d+)?/;
+    const found = findNearestBelow(words, label, numRegex);
+    if(found) return (found||'').replace(/,/g,'').trim();
+  } else {
+    // fallback: search for small integer tokens likely consumption (1-4 digits)
+    for(const w of words){
+      const m = w.text.match(/^\d{1,4}$/);
+      if(m) return m[0];
+    }
+  }
+  return "Not Found";
+}
+
+/* Main flow */
 
 const fileInput = document.getElementById('fileInput');
 const cameraInput = document.getElementById('cameraInput');
@@ -240,6 +273,8 @@ const resultsTable = document.getElementById('results');
 const statusDiv = document.getElementById('status');
 const exportBtn = document.getElementById('exportBtn');
 const clearBtn = document.getElementById('clearBtn');
+const debugLog = document.getElementById('debugLog');
+
 let results = [];
 
 function setStatus(msg, loading=false){
@@ -255,112 +290,60 @@ function fileToDataURL(file){
   });
 }
 
-function resizeDataURL(dataURL, maxWidth=1200){
-  return new Promise((resolve)=>{
-    const img = new Image();
-    img.onload = ()=>{
-      const scale = Math.min(1, maxWidth / img.width);
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      resolve(canvas.toDataURL('image/jpeg', 0.85));
-    };
-    img.src = dataURL;
-  });
-}
-
-function calcDiff(prev, curr){
-  if(prev === null || prev === undefined || prev === '' || isNaN(prev) || prev == 0) return {text:"—", cls:"diff-gray"};
-  if(curr === null || curr === undefined || curr === '' || isNaN(curr)) return {text:"—", cls:"diff-gray"};
-  const diff = ((parseFloat(curr) - parseFloat(prev))/parseFloat(prev))*100;
-  const rounded = (Math.round(diff*10)/10).toFixed(1) + "%";
-  if(diff > 30) return {text: rounded, cls: "diff-red"};
-  return {text: rounded, cls: "diff-green"};
-}
-
-const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-
 async function processFile(file){
   try{
     const rawDataURL = await fileToDataURL(file);
-    const previewDataURL = await resizeDataURL(rawDataURL, 600);
-    setStatus("Preparing OCR for " + file.name, true);
+    setStatus("Processing " + file.name, true);
 
-    // resize for OCR moderately
-    const ocrDataURL = await resizeDataURL(rawDataURL, 1000);
-
+    // Recognize: use direct on iOS, worker on desktop for best compatibility
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
     let res = null;
     if(isIOS){
-      // direct mode (more reliable on iOS)
       const { recognize } = Tesseract;
-      res = await recognize(ocrDataURL, 'eng', {
-        logger: m => { if(m.status && m.status === 'recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true); }
-      });
+      res = await recognize(rawDataURL, 'eng', { logger: m=>{ if(m.status==='recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true);} });
     } else {
-      // worker mode on desktop
       const { createWorker } = Tesseract;
-      const worker = await createWorker({
-        logger: m => { if(m.status && m.status === 'recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true); }
-      });
+      const worker = await createWorker({ logger: m=>{ if(m.status==='recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true);} });
       await worker.loadLanguage('eng');
       await worker.initialize('eng');
-      const r = await worker.recognize(ocrDataURL);
+      const r = await worker.recognize(rawDataURL);
       res = r;
       await worker.terminate();
     }
 
-    const data = (res && res.data) ? res.data : {};
-    // Build lines: prefer data.lines else build from words
-    let lines = [];
-    if(data.lines && data.lines.length){
-      lines = data.lines.map(l => {
-        const bbox = getBBox(l) || getBBox(l.words && l.words[0]) || {x0:0,y0:0,x1:0,y1:0};
-        return { text: (l.text||'').trim(), bbox, cy: bbox.y0 };
-      });
-      // sort by vertical position
-      lines.sort((a,b) => a.bbox.y0 - b.bbox.y0);
-    } else if(data.words && data.words.length){
-      lines = buildLinesFromWords(data.words);
-    } else if(data.text){
-      // fallback: split by newline
-      lines = data.text.split(/\r?\n/).map((t,i) => ({ text: t.trim(), bbox: {x0:0,y0:i*10,x1:0,y1:i*10+6}, cy: i*10 }));
-    }
+    const data = res && res.data ? res.data : {};
+    // extract using spatial logic
+    const meterOCR = extractMeterFromData(data) || "Not Found";
+    const consumptionOCR = extractConsumptionFromData(data) || "Not Found";
 
-    // Extract meter & consumption using spatial logic
-    const meterOCR = extractMeterFromLines(lines);
-    const consumptionOCR = extractConsumptionFromLines(lines);
-
-    // Validation against Step 1
-    let name = "⚠️ Not Found";
-    let meterPrev = "⚠️ Not Found";
-    let prevCons = "⚠️ Not Found";
-    if(prevData.length > 0 && meterOCR && meterOCR !== "Not Found"){
-      const found = prevData.find(r => ((r["Meter No."]||'').toString().trim()) === meterOCR.toString().trim());
-      if(found){
+    // matching with prevData using cleaned keys and fallback last6 digits
+    let name = "⚠️ Not Found", meterPrev = "⚠️ Not Found", prevCons = "⚠️ Not Found";
+    const cleanedOCR = cleanMeter(meterOCR);
+    if(cleanedOCR && prevMap[cleanedOCR]){
+      const found = prevMap[cleanedOCR];
+      name = found.Name || '';
+      meterPrev = found.Meter || '';
+      prevCons = found.Consumption || '';
+    } else {
+      // fallback last 6 digits match
+      const digits = cleanedOCR.replace(/[^0-9]/g,'');
+      const last6 = digits.slice(-6);
+      if(last6 && prevMapLast6[last6]){
+        const found = prevMapLast6[last6];
         name = found.Name || '';
-        meterPrev = found["Meter No."] || '';
+        meterPrev = found.Meter || '';
         prevCons = found.Consumption || '';
       }
     }
 
     const diffObj = calcDiff(prevCons, consumptionOCR);
+    const preview = rawDataURL; // using dataURL as preview
 
-    const row = {
-      preview: previewDataURL,
-      name,
-      meterPrev,
-      meterOCR,
-      prevCons,
-      consumptionOCR,
-      diffText: diffObj.text,
-      diffClass: diffObj.cls
-    };
+    const row = { preview, name, meterPrev, meterOCR, prevCons, consumptionOCR, diffText: diffObj.text, diffClass: diffObj.cls };
     results.push(row);
 
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td><img class="thumb" src="${previewDataURL}" alt="preview"></td>
+    tr.innerHTML = `<td><img class="thumb" src="${preview}" alt="preview"></td>
                     <td>${name.includes("⚠️")? "<span class='warn'>"+name+"</span>" : name}</td>
                     <td>${meterPrev.includes("⚠️")? "<span class='warn'>"+meterPrev+"</span>" : meterPrev}</td>
                     <td>${meterOCR}</td>
@@ -368,6 +351,20 @@ async function processFile(file){
                     <td>${consumptionOCR}</td>
                     <td class="${diffObj.cls}">${diffObj.text}</td>`;
     resultsTable.appendChild(tr);
+
+    // debug log
+    if(debugLog){
+      const dbg = [
+        "=== OCR DEBUG: " + file.name,
+        "OCR raw text preview:",
+        (data.text||'').slice(0,800),
+        "Detected meterOCR: " + meterOCR,
+        "Detected consumptionOCR: " + consumptionOCR,
+        "Matched previous: " + (name && !name.startsWith('⚠️') ? JSON.stringify({name,meterPrev,prevCons}) : 'No'),
+        ""
+      ].join("\n");
+      debugLog.textContent = (debugLog.textContent || "") + dbg + "\n\n";
+    }
 
     setStatus("Done processing " + file.name, false);
   } catch(err){
@@ -383,14 +380,8 @@ async function processFiles(files){
   setStatus("All done", false);
 }
 
-fileInput.addEventListener('change', e => {
-  const files = Array.from(e.target.files || []);
-  if(files.length) processFiles(files);
-});
-cameraInput.addEventListener('change', e => {
-  const files = Array.from(e.target.files || []);
-  if(files.length) processFiles(files);
-});
+fileInput.addEventListener('change', e => { const files = Array.from(e.target.files || []); if(files.length) processFiles(files); });
+cameraInput.addEventListener('change', e => { const files = Array.from(e.target.files || []); if(files.length) processFiles(files); });
 
 exportBtn.addEventListener('click', ()=>{
   if(!results.length){ alert('No data to export'); return; }
@@ -408,6 +399,7 @@ clearBtn.addEventListener('click', ()=>{
   results = [];
   resultsTable.innerHTML = '';
   setStatus('Cleared', false);
+  if(debugLog) debugLog.textContent = '';
 });
 </script>
 </body>
