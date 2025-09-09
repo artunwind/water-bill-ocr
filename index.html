@@ -3,11 +3,9 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Water Bill OCR — Improved</title>
+<title>Water Bill OCR — Camera + Upload</title>
 
-<!-- Tesseract.js v5 -->
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<!-- SheetJS -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
 
 <style>
@@ -26,18 +24,23 @@
   .spinner{width:20px;height:20px;border:3px solid #ccc;border-top-color:#4facfe;border-radius:50%;
            animation:spin 1s linear infinite;display:inline-block;}
   img.thumb{width:60px;height:auto;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,0.08);}
-  .row{display:flex;gap:10px;align-items:center}
-  .col{flex:1}
 </style>
 </head>
 <body>
 <header>
   <h1>📄 Water Bill OCR</h1>
-  <p>Improved extraction: picks value **below** the label (Meter No. / Qty).</p>
+  <p>Upload photos or take a new one, then extract Meter No. and Consumption.</p>
 </header>
 
 <div class="card">
-  <input type="file" id="fileInput" accept="image/*" multiple>
+  <label class="btn secondary">
+    Upload Photo(s)
+    <input type="file" id="fileInput" accept="image/*" multiple hidden>
+  </label>
+  <label class="btn secondary">
+    Take Photo
+    <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
+  </label>
   <button id="clearBtn" class="btn secondary">Clear</button>
   <button id="exportBtn" class="btn primary">Export to Excel</button>
   <div id="status" style="margin-top:10px;color:#555"></div>
@@ -51,113 +54,8 @@
 </div>
 
 <script>
-/* Utilities to get bbox from Tesseract structures */
-function getBBox(obj){
-  if(!obj) return null;
-  if(obj.bbox){
-    // tesseract v5: bbox usually has x0,y0,x1,y1
-    return {x0: obj.bbox.x0, y0: obj.bbox.y0, x1: obj.bbox.x1, y1: obj.bbox.y1};
-  }
-  // older variants
-  if(obj.x0 !== undefined && obj.y0 !== undefined){
-    return {x0: obj.x0, y0: obj.y0, x1: obj.x1, y1: obj.y1};
-  }
-  // fallback: null
-  return null;
-}
-
-/* Build line objects from words if lines are not provided */
-function buildLinesFromWords(words){
-  if(!words || !words.length) return [];
-  const items = words.map(w => {
-    const bbox = getBBox(w) || {x0:0,y0:0,x1:0,y1:0};
-    const cy = (bbox.y0 + bbox.y1) / 2;
-    return { text: w.text || '', bbox, cy };
-  }).filter(it => it.text && it.text.trim().length);
-  // sort by cy
-  items.sort((a,b) => a.cy - b.cy);
-  const lines = [];
-  const TH = 10; // pixels threshold grouping
-  for(const it of items){
-    if(!lines.length) { lines.push({ words: [it], cy: it.cy }); continue; }
-    const last = lines[lines.length-1];
-    if(Math.abs(it.cy - last.cy) <= TH){
-      last.words.push(it);
-      last.cy = (last.cy * (last.words.length -1) + it.cy) / last.words.length;
-    } else {
-      lines.push({ words: [it], cy: it.cy });
-    }
-  }
-  // convert to line objects
-  return lines.map(line => {
-    const text = line.words.map(w => w.text).join(' ');
-    const x0 = Math.min(...line.words.map(w => w.bbox.x0));
-    const y0 = Math.min(...line.words.map(w => w.bbox.y0));
-    const x1 = Math.max(...line.words.map(w => w.bbox.x1));
-    const y1 = Math.max(...line.words.map(w => w.bbox.y1));
-    return { text, bbox: { x0,y0,x1,y1 }, cy: line.cy };
-  });
-}
-
-/* Find the first line matching label regex */
-function findLabelLine(lines, regex){
-  for(let i=0;i<lines.length;i++){
-    if(regex.test(lines[i].text)) return {line: lines[i], index: i};
-  }
-  return null;
-}
-
-/* Candidate extraction below label: look at next few lines */
-function extractValueBelow(lines, labelRegex, valueMatchers){
-  const found = findLabelLine(lines, labelRegex);
-  if(found){
-    const start = found.index + 1;
-    for(let i=start;i<Math.min(lines.length, start+3); i++){
-      const lineText = lines[i].text;
-      for(const vm of valueMatchers){
-        const m = lineText.match(vm);
-        if(m) return m[1] || m[0];
-      }
-    }
-    // if nothing matched in next lines, return the next line raw trimmed
-    if(start < lines.length) return lines[start].text.trim();
-  }
-  return null;
-}
-
-/* Global fallback search for meter pattern anywhere */
-function findMeterByPattern(lines){
-  const patterns = [
-    /([A-Z]{2,3}-\d{1,2}-\d{1,2}-\d{3,})/i,
-    /([A-Z]{2,}[A-Z0-9\-\s]{3,})/i,
-    /(AJP[^\s,]+)/i
-  ];
-  for(const line of lines){
-    for(const p of patterns){
-      const m = line.text.match(p);
-      if(m) return m[1] || m[0];
-    }
-  }
-  // try words fallback (numbers+letters)
-  for(const line of lines){
-    const m = line.text.match(/\b([A-Z0-9\-]{6,})\b/);
-    if(m) return m[1];
-  }
-  return null;
-}
-
-/* Extract consumption globally fallback */
-function findConsumptionByPattern(lines){
-  for(const line of lines){
-    const m = line.text.match(/(\d{1,5})/);
-    if(m) return m[1];
-  }
-  return null;
-}
-
-
-/* Main app logic */
 const fileInput = document.getElementById('fileInput');
+const cameraInput = document.getElementById('cameraInput');
 const resultsTable = document.getElementById('results');
 const statusDiv = document.getElementById('status');
 const exportBtn = document.getElementById('exportBtn');
@@ -202,92 +100,37 @@ function addResultRow(previewDataURL, fileName, meterNo, consumption){
   resultsTable.appendChild(tr);
 }
 
-const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+async function processFiles(files){
+  for (const file of files){
+    const rawDataURL = await fileToDataURL(file);
+    const previewDataURL = await resizeImageDataURL(rawDataURL, 600);
+    addResultRow(previewDataURL, file.name, "Processing...", "Processing...");
 
-fileInput.addEventListener('change', async (e) => {
-  const files = Array.from(e.target.files);
-  results = [];
-  resultsTable.innerHTML = '';
-  if (!files.length) return;
-  setStatus('Starting OCR...', true);
+    const { recognize } = Tesseract;
+    const res = await recognize(rawDataURL, 'eng', {
+      logger: m => { if(m.status === 'recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true); }
+    });
+    const text = res.data.text;
+    let meter = "Not Found", consumption = "Not Found";
 
-  for (let i = 0; i < files.length; i++){
-    const file = files[i];
-    try{
-      setStatus(`Preparing ${file.name} (${i+1}/${files.length})`, true);
-      const rawDataURL = await fileToDataURL(file);
-      const previewDataURL = await resizeImageDataURL(rawDataURL, 600);
-      // resize for OCR too
-      const ocrDataURL = await resizeImageDataURL(rawDataURL, 1000);
+    const meterMatch = text.match(/(?:Meter\s*No\.?\s*[\n\r ]*)([A-Z0-9\-]+)/i) || text.match(/(AJP[^\s]+)/i);
+    if(meterMatch) meter = meterMatch[1] || meterMatch[0];
 
-      setStatus(`Processing ${file.name} (${i+1}/${files.length})`, true);
+    const consMatch = text.match(/(?:Qty\s*[\n\r ]*)(\d+)/i);
+    if(consMatch) consumption = consMatch[1];
 
-      let res = null;
-      if (isIOS){
-        // direct mode
-        const { recognize } = Tesseract;
-        res = await recognize(ocrDataURL, 'eng', {
-          logger: m => {
-            if (m.status === 'recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true);
-          }
-        });
-        // res.data should contain lines/words
-      } else {
-        // worker mode (desktop)
-        const { createWorker } = Tesseract;
-        const worker = await createWorker({
-          logger: m => {
-            if (m.status === 'recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true);
-          }
-        });
-        await worker.loadLanguage('eng');
-        await worker.initialize('eng');
-        await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-' });
-        const r = await worker.recognize(ocrDataURL);
-        res = r;
-        await worker.terminate();
-      }
+    results.push({ fileName: file.name, meterNo: meter, consumption: consumption });
 
-      const data = res && res.data ? res.data : {};
-      let lines = data.lines && data.lines.length ? data.lines.map(l => ({ text: l.text, bbox: getBBox(l), cy: (getBBox(l).y0+getBBox(l).y1)/2 })) : null;
-      if(!lines || !lines.length){
-        // build from words
-        const words = data.words || [];
-        lines = buildLinesFromWords(words);
-      } else {
-        // ensure sorted by vertical position
-        lines.sort((a,b) => a.bbox.y0 - b.bbox.y0);
-      }
-
-      // Attempt spatial extraction
-      const meterLabelRegex = /Meter\s*No\.?|Meter\s*Number|METER\s*NO/i;
-      const qtyLabelRegex = /Qty|Quantity|Consumption\s*Qty|Consumption/i;
-
-      let meter = extractValueBelow(lines, meterLabelRegex, [
-        /([A-Z]{2,3}-\d{1,2}-\d{1,2}-\d{3,})/i,
-        /(AJP[^\s,]+)/i,
-        /([A-Z0-9\-]{6,})/i
-      ]);
-
-      let consumption = extractValueBelow(lines, qtyLabelRegex, [
-        /(\d{1,5})/i
-      ]);
-
-      // Global fallbacks
-      if(!meter || meter === null) meter = findMeterByPattern(lines) || 'Not Found';
-      if(!consumption || consumption === null) consumption = findConsumptionByPattern(lines) || 'Not Found';
-
-      results.push({ fileName: file.name, meterNo: meter, consumption: consumption });
-      addResultRow(previewDataURL, file.name, meter, consumption);
-    } catch(err){
-      console.error('OCR error', err);
-      results.push({ fileName: file.name, meterNo: 'Error', consumption: 'Error' });
-      addResultRow('', file.name, 'Error', 'Error');
-    }
+    resultsTable.lastChild.innerHTML = `<td><img class="thumb" src="${previewDataURL}" alt="preview"></td>
+                  <td>${file.name}</td>
+                  <td>${meter}</td>
+                  <td>${consumption}</td>`;
   }
+  setStatus("Done");
+}
 
-  setStatus(`Done — ${results.length} file(s) processed`, false);
-});
+fileInput.addEventListener('change', e => processFiles(e.target.files));
+cameraInput.addEventListener('change', e => processFiles(e.target.files));
 
 exportBtn.addEventListener('click', ()=>{
   if(!results.length){ alert('No data to export'); return; }
@@ -299,6 +142,7 @@ exportBtn.addEventListener('click', ()=>{
 
 clearBtn.addEventListener('click', ()=>{
   fileInput.value = '';
+  cameraInput.value = '';
   results = [];
   resultsTable.innerHTML = '';
   setStatus('Cleared', false);
