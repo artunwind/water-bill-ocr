@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Water Bill OCR — Combined</title>
+<title>Water Bill OCR — Spatial Extraction</title>
 
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
 
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica Neue,Arial;
-       background:#f2f6fb;margin:0;padding:18px;max-width:650px;margin:auto;}
+       background:#f2f6fb;margin:0;padding:18px;max-width:700px;margin:auto;}
   header{background:linear-gradient(135deg,#4facfe,#00f2fe);color:white;padding:18px;border-radius:14px;}
   h1{margin:0;font-size:20px;}
   .card{background:white;padding:14px;margin-top:16px;border-radius:12px;box-shadow:0 4px 10px rgba(0,0,0,.08);}
@@ -27,12 +27,15 @@
   .diff-red{color:red;font-weight:bold;}
   .diff-green{color:green;font-weight:bold;}
   .diff-gray{color:gray;}
+  img.thumb{width:64px;height:auto;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,0.08);}
+  .row-flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+  .col{flex:1;min-width:120px;}
 </style>
 </head>
 <body>
 <header>
-  <h1>📄 Water Bill OCR (With Validation & % Difference)</h1>
-  <p>Step 1: Upload past Excel, Step 2: Scan new bills and compare results.</p>
+  <h1>📄 Water Bill OCR (Spatial Extraction)</h1>
+  <p>Step 1: Upload previous readings. Step 2: Scan bills — we extract values located <strong>below</strong> the labels.</p>
 </header>
 
 <div class="card">
@@ -43,20 +46,22 @@
 
 <div class="card">
   <h2>Step 2: OCR New Water Bills</h2>
-  <label class="btn secondary">
-    Upload Photo(s)
-    <input type="file" id="fileInput" accept="image/*" multiple hidden>
-  </label>
-  <label class="btn secondary">
-    Take Photo
-    <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
-  </label>
-  <button id="clearBtn" class="btn secondary">Clear</button>
-  <button id="exportBtn" class="btn primary">Export to Excel</button>
+  <div class="row-flex">
+    <label class="btn secondary col">
+      Upload Photo(s)
+      <input type="file" id="fileInput" accept="image/*" multiple hidden>
+    </label>
+    <label class="btn secondary col">
+      Take Photo
+      <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
+    </label>
+    <button id="clearBtn" class="btn secondary col">Clear</button>
+    <button id="exportBtn" class="btn primary col">Export to Excel</button>
+  </div>
   <div id="status" style="margin-top:10px;color:#555"></div>
   <table>
     <thead><tr>
-      <th>Name</th><th>Meter No. (Prev)</th><th>Meter No. (OCR)</th>
+      <th>Preview</th><th>Name</th><th>Meter No. (Prev)</th><th>Meter No. (OCR)</th>
       <th>Prev Consumption</th><th>Current Consumption (OCR)</th><th>% Difference</th>
     </tr></thead>
     <tbody id="results"></tbody>
@@ -64,26 +69,171 @@
 </div>
 
 <script>
+/* Spatial OCR extraction functions */
+
+function getBBox(obj){
+  if(!obj) return null;
+  // tesseract v5 uses bbox with x0,y0,x1,y1 or bbox property
+  if(obj.bbox && typeof obj.bbox === 'object'){
+    const b = obj.bbox;
+    return { x0: b.x0 ?? b.x1 - (b.x1-b.x0), y0: b.y0 ?? b.y1 - (b.y1-b.y0), x1: b.x1 ?? b.x0, y1: b.y1 ?? b.y0 };
+  }
+  if(obj.x0 !== undefined && obj.y0 !== undefined){
+    return { x0: obj.x0, y0: obj.y0, x1: obj.x1, y1: obj.y1 };
+  }
+  if(obj.left !== undefined && obj.top !== undefined){
+    return { x0: obj.left, y0: obj.top, x1: obj.left + (obj.width||0), y1: obj.top + (obj.height||0) };
+  }
+  return null;
+}
+
+function buildLinesFromWords(words){
+  if(!words || !words.length) return [];
+  const items = words.map(w => {
+    const bbox = getBBox(w) || {x0:0,y0:0,x1:0,y1:0};
+    const cy = (bbox.y0 + bbox.y1) / 2;
+    return { text: (w.text||'').trim(), bbox, cy, h: bbox.y1 - bbox.y0 };
+  }).filter(it => it.text && it.text.length);
+  if(!items.length) return [];
+  // sort by vertical position
+  items.sort((a,b) => a.cy - b.cy);
+  // compute median height
+  const heights = items.map(i=>i.h).filter(h=>h>0);
+  let medianH = 10;
+  if(heights.length){
+    heights.sort((a,b)=>a-b);
+    medianH = heights[Math.floor(heights.length/2)];
+  }
+  const TH = Math.max(8, Math.round(medianH * 0.6));
+  const lines = [];
+  for(const it of items){
+    if(!lines.length){
+      lines.push({ words: [it], cy: it.cy });
+    } else {
+      const last = lines[lines.length-1];
+      if(Math.abs(it.cy - last.cy) <= TH){
+        last.words.push(it);
+        last.cy = (last.cy * (last.words.length-1) + it.cy) / last.words.length;
+      } else {
+        lines.push({ words: [it], cy: it.cy });
+      }
+    }
+  }
+  // convert to line objects
+  return lines.map(line => {
+    const text = line.words.map(w => w.text).join(' ');
+    const x0 = Math.min(...line.words.map(w => w.bbox.x0));
+    const y0 = Math.min(...line.words.map(w => w.bbox.y0));
+    const x1 = Math.max(...line.words.map(w => w.bbox.x1));
+    const y1 = Math.max(...line.words.map(w => w.bbox.y1));
+    return { text: text.trim(), bbox: { x0,y0,x1,y1 }, cy: line.cy };
+  });
+}
+
+function findLabelLine(lines, regex){
+  for(let i=0;i<lines.length;i++){
+    if(regex.test(lines[i].text)) return { line: lines[i], index: i };
+  }
+  return null;
+}
+
+function getNextNonEmptyLineText(lines, index){
+  for(let i=index+1;i<lines.length;i++){
+    const t = (lines[i].text||'').trim();
+    if(t) return t;
+  }
+  return null;
+}
+
+function extractMeterFromLines(lines){
+  // primary: look for 'Meter No' label then get below line and match AJP or other id patterns
+  const labelRegex = /Meter\s*No\.?|Meter\s*Number|METER\s*NO/i;
+  const found = findLabelLine(lines, labelRegex);
+  if(found){
+    const below = getNextNonEmptyLineText(lines, found.index);
+    if(below){
+      // try to find pattern starting with AJP
+      let m = below.match(/(AJP[^\s,]+)/i);
+      if(m) return cleanMeter(m[1]);
+      // pattern like AJP-15-24-391727 or other alnum-hyphen
+      m = below.match(/([A-Z]{2,3}-\d{1,2}-\d{1,2}-\d{3,})/i);
+      if(m) return cleanMeter(m[1]);
+      // fallback: first large token
+      m = below.match(/\b([A-Z0-9\-]{5,})\b/);
+      if(m) return cleanMeter(m[1]);
+      // else return the whole line trimmed
+      return cleanMeter(below);
+    }
+  }
+  // fallback: search any line starting with AJP
+  for(const ln of lines){
+    const m = ln.text.match(/(AJP[^\s,]+)/i);
+    if(m) return cleanMeter(m[1]);
+  }
+  // global fallback token
+  for(const ln of lines){
+    const m = ln.text.match(/\b([A-Z0-9\-]{6,})\b/);
+    if(m) return cleanMeter(m[1]);
+  }
+  return "Not Found";
+}
+
+function cleanMeter(s){
+  if(!s) return s;
+  return s.replace(/[^A-Z0-9\-]/ig,'').trim();
+}
+
+function extractConsumptionFromLines(lines){
+  // find Qty label and use the next line's first integer
+  const labelRegex = /Qty|Quantity|Consumption\s*Qty|Consumption/i;
+  const found = findLabelLine(lines, labelRegex);
+  if(found){
+    const below = getNextNonEmptyLineText(lines, found.index);
+    if(below){
+      const m = below.match(/(\d{1,5})/);
+      if(m) return m[1];
+      // maybe value contains commas or decimals
+      const m2 = below.match(/([\d,]+\.\d+|[\d,]+)/);
+      if(m2) return m2[1].replace(/,/g,'');
+      return below.trim();
+    }
+  }
+  // fallback: look for nearby numbers in document
+  for(const ln of lines){
+    const m = ln.text.match(/(\d{1,5})/);
+    if(m) return m[1];
+  }
+  return "Not Found";
+}
+
+/* App UI and main flow */
+
 const prevExcelInput = document.getElementById('prevExcel');
 const prevStatus = document.getElementById('prevStatus');
 let prevData = [];
 
 prevExcelInput.addEventListener('change', e => {
   const file = e.target.files[0];
-  if(!file){ return; }
+  if(!file) return;
   const reader = new FileReader();
-  reader.onload = (evt)=>{
+  reader.onload = evt => {
     const data = new Uint8Array(evt.target.result);
     const workbook = XLSX.read(data, {type:'array'});
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const json = XLSX.utils.sheet_to_json(sheet);
-    prevData = json;
-    prevStatus.innerText = "Loaded " + json.length + " records from previous Excel.";
+    // normalize keys: accept "Name", "Meter No.", "Meter No", "Consumption", "Consumption Qty", etc.
+    prevData = json.map(r => {
+      const normalized = {};
+      normalized.Name = r.Name || r.Name || r['name'] || r['Name ' ] || '';
+      normalized["Meter No."] = r['Meter No.'] || r['Meter No'] || r['MeterNo'] || r['Meter'] || r['METER NO'] || '';
+      normalized.Consumption = r['Consumption'] || r['Consumption Qty'] || r['Qty'] || r['Current'] || r['consumption'] || '';
+      return normalized;
+    });
+    prevStatus.innerText = "Loaded " + prevData.length + " records from previous Excel.";
   };
   reader.readAsArrayBuffer(file);
 });
 
-// Step 2 (OCR part)
 const fileInput = document.getElementById('fileInput');
 const cameraInput = document.getElementById('cameraInput');
 const resultsTable = document.getElementById('results');
@@ -105,67 +255,146 @@ function fileToDataURL(file){
   });
 }
 
-function calcDiff(prev, curr){
-  if(!prev || isNaN(prev) || prev == 0 || !curr || isNaN(curr)) return {text:"—", cls:"diff-gray"};
-  const diff = ((curr - prev)/prev)*100;
-  const rounded = diff.toFixed(1) + "%";
-  if(diff > 30){ return {text: rounded, cls:"diff-red"}; }
-  else{ return {text: rounded, cls:"diff-green"}; }
+function resizeDataURL(dataURL, maxWidth=1200){
+  return new Promise((resolve)=>{
+    const img = new Image();
+    img.onload = ()=>{
+      const scale = Math.min(1, maxWidth / img.width);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.85));
+    };
+    img.src = dataURL;
+  });
 }
 
-async function processFiles(files){
-  for (const file of files){
+function calcDiff(prev, curr){
+  if(prev === null || prev === undefined || prev === '' || isNaN(prev) || prev == 0) return {text:"—", cls:"diff-gray"};
+  if(curr === null || curr === undefined || curr === '' || isNaN(curr)) return {text:"—", cls:"diff-gray"};
+  const diff = ((parseFloat(curr) - parseFloat(prev))/parseFloat(prev))*100;
+  const rounded = (Math.round(diff*10)/10).toFixed(1) + "%";
+  if(diff > 30) return {text: rounded, cls: "diff-red"};
+  return {text: rounded, cls: "diff-green"};
+}
+
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+
+async function processFile(file){
+  try{
     const rawDataURL = await fileToDataURL(file);
-    setStatus("Processing " + file.name, true);
+    const previewDataURL = await resizeDataURL(rawDataURL, 600);
+    setStatus("Preparing OCR for " + file.name, true);
 
-    const { recognize } = Tesseract;
-    const res = await recognize(rawDataURL, 'eng');
-    const text = res.data.text;
-    let meterOCR = "Not Found", consumptionOCR = "Not Found";
+    // resize for OCR moderately
+    const ocrDataURL = await resizeDataURL(rawDataURL, 1000);
 
-    const meterMatch = text.match(/(?:Meter\s*No\.?\s*[\n\r ]*)([A-Z0-9\-]+)/i) || text.match(/(AJP[^\s]+)/i);
-    if(meterMatch) meterOCR = meterMatch[1] || meterMatch[0];
+    let res = null;
+    if(isIOS){
+      // direct mode (more reliable on iOS)
+      const { recognize } = Tesseract;
+      res = await recognize(ocrDataURL, 'eng', {
+        logger: m => { if(m.status && m.status === 'recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true); }
+      });
+    } else {
+      // worker mode on desktop
+      const { createWorker } = Tesseract;
+      const worker = await createWorker({
+        logger: m => { if(m.status && m.status === 'recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true); }
+      });
+      await worker.loadLanguage('eng');
+      await worker.initialize('eng');
+      const r = await worker.recognize(ocrDataURL);
+      res = r;
+      await worker.terminate();
+    }
 
-    const consMatch = text.match(/(?:Qty\s*[\n\r ]*)(\d+)/i);
-    if(consMatch) consumptionOCR = consMatch[1];
+    const data = (res && res.data) ? res.data : {};
+    // Build lines: prefer data.lines else build from words
+    let lines = [];
+    if(data.lines && data.lines.length){
+      lines = data.lines.map(l => {
+        const bbox = getBBox(l) || getBBox(l.words && l.words[0]) || {x0:0,y0:0,x1:0,y1:0};
+        return { text: (l.text||'').trim(), bbox, cy: bbox.y0 };
+      });
+      // sort by vertical position
+      lines.sort((a,b) => a.bbox.y0 - b.bbox.y0);
+    } else if(data.words && data.words.length){
+      lines = buildLinesFromWords(data.words);
+    } else if(data.text){
+      // fallback: split by newline
+      lines = data.text.split(/\r?\n/).map((t,i) => ({ text: t.trim(), bbox: {x0:0,y0:i*10,x1:0,y1:i*10+6}, cy: i*10 }));
+    }
+
+    // Extract meter & consumption using spatial logic
+    const meterOCR = extractMeterFromLines(lines);
+    const consumptionOCR = extractConsumptionFromLines(lines);
 
     // Validation against Step 1
     let name = "⚠️ Not Found";
     let meterPrev = "⚠️ Not Found";
     let prevCons = "⚠️ Not Found";
-    if(prevData.length > 0){
-      const found = prevData.find(r => (r["Meter No."] || "").toString().trim() === meterOCR.trim());
+    if(prevData.length > 0 && meterOCR && meterOCR !== "Not Found"){
+      const found = prevData.find(r => ((r["Meter No."]||'').toString().trim()) === meterOCR.toString().trim());
       if(found){
-        name = found.Name || "";
-        meterPrev = found["Meter No."] || "";
-        prevCons = found.Consumption || "";
+        name = found.Name || '';
+        meterPrev = found["Meter No."] || '';
+        prevCons = found.Consumption || '';
       }
     }
 
-    const prevNum = parseFloat(prevCons);
-    const currNum = parseFloat(consumptionOCR);
-    const diffObj = calcDiff(prevNum, currNum);
+    const diffObj = calcDiff(prevCons, consumptionOCR);
 
-    const row = { name, meterPrev, meterOCR, prevCons, consumptionOCR, diff: diffObj.text };
+    const row = {
+      preview: previewDataURL,
+      name,
+      meterPrev,
+      meterOCR,
+      prevCons,
+      consumptionOCR,
+      diffText: diffObj.text,
+      diffClass: diffObj.cls
+    };
     results.push(row);
 
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${name.includes("⚠️") ? "<span class='warn'>"+name+"</span>" : name}</td>
-                    <td>${meterPrev.includes("⚠️") ? "<span class='warn'>"+meterPrev+"</span>" : meterPrev}</td>
+    tr.innerHTML = `<td><img class="thumb" src="${previewDataURL}" alt="preview"></td>
+                    <td>${name.includes("⚠️")? "<span class='warn'>"+name+"</span>" : name}</td>
+                    <td>${meterPrev.includes("⚠️")? "<span class='warn'>"+meterPrev+"</span>" : meterPrev}</td>
                     <td>${meterOCR}</td>
-                    <td>${prevCons.includes("⚠️") ? "<span class='warn'>"+prevCons+"</span>" : prevCons}</td>
+                    <td>${prevCons.includes("⚠️")? "<span class='warn'>"+prevCons+"</span>" : prevCons}</td>
                     <td>${consumptionOCR}</td>
-                    <td class='${diffObj.cls}'>${diffObj.text}</td>`;
+                    <td class="${diffObj.cls}">${diffObj.text}</td>`;
     resultsTable.appendChild(tr);
+
+    setStatus("Done processing " + file.name, false);
+  } catch(err){
+    console.error("Error processing file", err);
+    setStatus("Error processing " + file.name, false);
   }
-  setStatus("Done");
 }
 
-fileInput.addEventListener('change', e => processFiles(e.target.files));
-cameraInput.addEventListener('change', e => processFiles(e.target.files));
+async function processFiles(files){
+  for(const f of files){
+    await processFile(f);
+  }
+  setStatus("All done", false);
+}
+
+fileInput.addEventListener('change', e => {
+  const files = Array.from(e.target.files || []);
+  if(files.length) processFiles(files);
+});
+cameraInput.addEventListener('change', e => {
+  const files = Array.from(e.target.files || []);
+  if(files.length) processFiles(files);
+});
 
 exportBtn.addEventListener('click', ()=>{
   if(!results.length){ alert('No data to export'); return; }
+  // Export only Name, Meter No. (Prev), Current Consumption
   const exportData = results.map(r=>({ Name: r.name, "Meter No.": r.meterPrev, "Current Consumption": r.consumptionOCR }));
   const ws = XLSX.utils.json_to_sheet(exportData);
   const wb = XLSX.utils.book_new();
@@ -174,8 +403,8 @@ exportBtn.addEventListener('click', ()=>{
 });
 
 clearBtn.addEventListener('click', ()=>{
-  fileInput.value = '';
-  cameraInput.value = '';
+  document.getElementById('fileInput').value = '';
+  document.getElementById('cameraInput').value = '';
   results = [];
   resultsTable.innerHTML = '';
   setStatus('Cleared', false);
