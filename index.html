@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Water Bill OCR — Hybrid</title>
+<title>Water Bill OCR — Improved</title>
 
 <!-- Tesseract.js v5 -->
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
@@ -25,13 +25,15 @@
   tr:nth-child(even){background:#fcfcfc;}
   .spinner{width:20px;height:20px;border:3px solid #ccc;border-top-color:#4facfe;border-radius:50%;
            animation:spin 1s linear infinite;display:inline-block;}
-  @keyframes spin{to{transform:rotate(360deg)}}
+  img.thumb{width:60px;height:auto;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,0.08);}
+  .row{display:flex;gap:10px;align-items:center}
+  .col{flex:1}
 </style>
 </head>
 <body>
 <header>
   <h1>📄 Water Bill OCR</h1>
-  <p>Extract Meter No. & Consumption Qty from bill images</p>
+  <p>Improved extraction: picks value **below** the label (Meter No. / Qty).</p>
 </header>
 
 <div class="card">
@@ -43,128 +45,263 @@
 
 <div class="card">
   <table>
-    <thead><tr><th>File</th><th>Meter No.</th><th>Consumption</th></tr></thead>
+    <thead><tr><th>Preview</th><th>File</th><th>Meter No.</th><th>Consumption</th></tr></thead>
     <tbody id="results"></tbody>
   </table>
 </div>
 
 <script>
-const fileInput=document.getElementById('fileInput');
-const resultsTable=document.getElementById('results');
-const statusDiv=document.getElementById('status');
-const exportBtn=document.getElementById('exportBtn');
-const clearBtn=document.getElementById('clearBtn');
-let results=[];
-
-function setStatus(msg,loading=false){
-  statusDiv.innerHTML = loading? msg+' <span class="spinner"></span>' : msg;
+/* Utilities to get bbox from Tesseract structures */
+function getBBox(obj){
+  if(!obj) return null;
+  if(obj.bbox){
+    // tesseract v5: bbox usually has x0,y0,x1,y1
+    return {x0: obj.bbox.x0, y0: obj.bbox.y0, x1: obj.bbox.x1, y1: obj.bbox.y1};
+  }
+  // older variants
+  if(obj.x0 !== undefined && obj.y0 !== undefined){
+    return {x0: obj.x0, y0: obj.y0, x1: obj.x1, y1: obj.y1};
+  }
+  // fallback: null
+  return null;
 }
 
-function resizeImage(file,maxWidth=1000){
-  return new Promise(resolve=>{
-    const img=new Image();
-    const reader=new FileReader();
-    reader.onload=e=>{
-      img.onload=()=>{
-        const scale=Math.min(1,maxWidth/img.width);
-        const canvas=document.createElement('canvas');
-        canvas.width=img.width*scale;
-        canvas.height=img.height*scale;
-        const ctx=canvas.getContext('2d');
-        ctx.drawImage(img,0,0,canvas.width,canvas.height);
-        resolve(canvas.toDataURL('image/jpeg',0.8));
-      };
-      img.src=e.target.result;
-    };
+/* Build line objects from words if lines are not provided */
+function buildLinesFromWords(words){
+  if(!words || !words.length) return [];
+  const items = words.map(w => {
+    const bbox = getBBox(w) || {x0:0,y0:0,x1:0,y1:0};
+    const cy = (bbox.y0 + bbox.y1) / 2;
+    return { text: w.text || '', bbox, cy };
+  }).filter(it => it.text && it.text.trim().length);
+  // sort by cy
+  items.sort((a,b) => a.cy - b.cy);
+  const lines = [];
+  const TH = 10; // pixels threshold grouping
+  for(const it of items){
+    if(!lines.length) { lines.push({ words: [it], cy: it.cy }); continue; }
+    const last = lines[lines.length-1];
+    if(Math.abs(it.cy - last.cy) <= TH){
+      last.words.push(it);
+      last.cy = (last.cy * (last.words.length -1) + it.cy) / last.words.length;
+    } else {
+      lines.push({ words: [it], cy: it.cy });
+    }
+  }
+  // convert to line objects
+  return lines.map(line => {
+    const text = line.words.map(w => w.text).join(' ');
+    const x0 = Math.min(...line.words.map(w => w.bbox.x0));
+    const y0 = Math.min(...line.words.map(w => w.bbox.y0));
+    const x1 = Math.max(...line.words.map(w => w.bbox.x1));
+    const y1 = Math.max(...line.words.map(w => w.bbox.y1));
+    return { text, bbox: { x0,y0,x1,y1 }, cy: line.cy };
+  });
+}
+
+/* Find the first line matching label regex */
+function findLabelLine(lines, regex){
+  for(let i=0;i<lines.length;i++){
+    if(regex.test(lines[i].text)) return {line: lines[i], index: i};
+  }
+  return null;
+}
+
+/* Candidate extraction below label: look at next few lines */
+function extractValueBelow(lines, labelRegex, valueMatchers){
+  const found = findLabelLine(lines, labelRegex);
+  if(found){
+    const start = found.index + 1;
+    for(let i=start;i<Math.min(lines.length, start+3); i++){
+      const lineText = lines[i].text;
+      for(const vm of valueMatchers){
+        const m = lineText.match(vm);
+        if(m) return m[1] || m[0];
+      }
+    }
+    // if nothing matched in next lines, return the next line raw trimmed
+    if(start < lines.length) return lines[start].text.trim();
+  }
+  return null;
+}
+
+/* Global fallback search for meter pattern anywhere */
+function findMeterByPattern(lines){
+  const patterns = [
+    /([A-Z]{2,3}-\d{1,2}-\d{1,2}-\d{3,})/i,
+    /([A-Z]{2,}[A-Z0-9\-\s]{3,})/i,
+    /(AJP[^\s,]+)/i
+  ];
+  for(const line of lines){
+    for(const p of patterns){
+      const m = line.text.match(p);
+      if(m) return m[1] || m[0];
+    }
+  }
+  // try words fallback (numbers+letters)
+  for(const line of lines){
+    const m = line.text.match(/\b([A-Z0-9\-]{6,})\b/);
+    if(m) return m[1];
+  }
+  return null;
+}
+
+/* Extract consumption globally fallback */
+function findConsumptionByPattern(lines){
+  for(const line of lines){
+    const m = line.text.match(/(\d{1,5})/);
+    if(m) return m[1];
+  }
+  return null;
+}
+
+
+/* Main app logic */
+const fileInput = document.getElementById('fileInput');
+const resultsTable = document.getElementById('results');
+const statusDiv = document.getElementById('status');
+const exportBtn = document.getElementById('exportBtn');
+const clearBtn = document.getElementById('clearBtn');
+let results = [];
+
+function setStatus(msg, loading=false){
+  statusDiv.innerHTML = loading ? msg + ' <span class="spinner"></span>' : msg;
+}
+
+function fileToDataURL(file){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
     reader.readAsDataURL(file);
   });
 }
 
-function extractMeterNo(text){
-  const patterns=[/Meter\s*No\.?\s*[:\-]?\s*([A-Z0-9\-]+)/i,/([A-Z]{2,3}-\d{1,2}-\d{1,2}-\d{4,})/i];
-  for(const p of patterns){const m=text.match(p);if(m)return m[1];}
-  return "Not Found";
-}
-function extractConsumption(text){
-  const m=text.match(/Consumption\s*Qty\s*(\d+)/i);if(m)return m[1];
-  const nums=text.match(/\b\d{1,4}\b/g);return nums?nums[nums.length-1]:"Not Found";
+function resizeImageDataURL(dataURL, maxWidth=1000){
+  return new Promise((resolve)=>{
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxWidth / img.width);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.8));
+    };
+    img.src = dataURL;
+  });
 }
 
-// Detect iOS (Safari/Chrome)
+function addResultRow(previewDataURL, fileName, meterNo, consumption){
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td><img class="thumb" src="${previewDataURL}" alt="preview"></td>
+                  <td>${fileName}</td>
+                  <td>${meterNo}</td>
+                  <td>${consumption}</td>`;
+  resultsTable.appendChild(tr);
+}
+
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
 
-fileInput.addEventListener('change',async e=>{
-  const files=[...e.target.files];
-  results=[];resultsTable.innerHTML="";
-  if(!files.length)return;
-  setStatus("Starting OCR...",true);
+fileInput.addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files);
+  results = [];
+  resultsTable.innerHTML = '';
+  if (!files.length) return;
+  setStatus('Starting OCR...', true);
 
-  for(let i=0;i<files.length;i++){
-    const file=files[i];
-    setStatus(`Processing ${file.name} (${i+1}/${files.length})`,true);
+  for (let i = 0; i < files.length; i++){
+    const file = files[i];
     try{
-      const dataURL=await resizeImage(file,1000);
+      setStatus(`Preparing ${file.name} (${i+1}/${files.length})`, true);
+      const rawDataURL = await fileToDataURL(file);
+      const previewDataURL = await resizeImageDataURL(rawDataURL, 600);
+      // resize for OCR too
+      const ocrDataURL = await resizeImageDataURL(rawDataURL, 1000);
 
-      let text="";
-      if(isIOS){
-        // Direct mode for iOS (no worker)
+      setStatus(`Processing ${file.name} (${i+1}/${files.length})`, true);
+
+      let res = null;
+      if (isIOS){
+        // direct mode
         const { recognize } = Tesseract;
-        const res=await recognize(dataURL,'eng',{
-          logger:m=>{
-            if(m.status==='recognizing text'){
-              setStatus(`Processing ${file.name} (${i+1}/${files.length}) — ${Math.round(m.progress*100)}%`,true);
-            }
+        res = await recognize(ocrDataURL, 'eng', {
+          logger: m => {
+            if (m.status === 'recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true);
           }
         });
-        text=res.data.text;
-      }else{
-        // Worker mode for desktop
+        // res.data should contain lines/words
+      } else {
+        // worker mode (desktop)
         const { createWorker } = Tesseract;
         const worker = await createWorker({
           logger: m => {
-            if(m.status === 'recognizing text'){
-              setStatus(`Processing ${file.name} (${i+1}/${files.length}) — ${Math.round(m.progress*100)}%`, true);
-            }
+            if (m.status === 'recognizing text') setStatus(`Processing ${file.name} — ${Math.round(m.progress*100)}%`, true);
           }
         });
         await worker.loadLanguage('eng');
         await worker.initialize('eng');
-        await worker.setParameters({
-          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-'
-        });
-        const {data:{text:txt}}=await worker.recognize(dataURL);
-        text=txt;
+        await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-' });
+        const r = await worker.recognize(ocrDataURL);
+        res = r;
         await worker.terminate();
       }
 
-      const meter=extractMeterNo(text);
-      const cons=extractConsumption(text);
+      const data = res && res.data ? res.data : {};
+      let lines = data.lines && data.lines.length ? data.lines.map(l => ({ text: l.text, bbox: getBBox(l), cy: (getBBox(l).y0+getBBox(l).y1)/2 })) : null;
+      if(!lines || !lines.length){
+        // build from words
+        const words = data.words || [];
+        lines = buildLinesFromWords(words);
+      } else {
+        // ensure sorted by vertical position
+        lines.sort((a,b) => a.bbox.y0 - b.bbox.y0);
+      }
 
-      results.push({fileName:file.name,meterNo:meter,consumption:cons});
-      resultsTable.innerHTML+=`<tr><td>${file.name}</td><td>${meter}</td><td>${cons}</td></tr>`;
-    }catch(err){
-      console.error(err);
-      results.push({fileName:file.name,meterNo:"Error",consumption:"Error"});
-      resultsTable.innerHTML+=`<tr><td>${file.name}</td><td>Error</td><td>Error</td></tr>`;
+      // Attempt spatial extraction
+      const meterLabelRegex = /Meter\s*No\.?|Meter\s*Number|METER\s*NO/i;
+      const qtyLabelRegex = /Qty|Quantity|Consumption\s*Qty|Consumption/i;
+
+      let meter = extractValueBelow(lines, meterLabelRegex, [
+        /([A-Z]{2,3}-\d{1,2}-\d{1,2}-\d{3,})/i,
+        /(AJP[^\s,]+)/i,
+        /([A-Z0-9\-]{6,})/i
+      ]);
+
+      let consumption = extractValueBelow(lines, qtyLabelRegex, [
+        /(\d{1,5})/i
+      ]);
+
+      // Global fallbacks
+      if(!meter || meter === null) meter = findMeterByPattern(lines) || 'Not Found';
+      if(!consumption || consumption === null) consumption = findConsumptionByPattern(lines) || 'Not Found';
+
+      results.push({ fileName: file.name, meterNo: meter, consumption: consumption });
+      addResultRow(previewDataURL, file.name, meter, consumption);
+    } catch(err){
+      console.error('OCR error', err);
+      results.push({ fileName: file.name, meterNo: 'Error', consumption: 'Error' });
+      addResultRow('', file.name, 'Error', 'Error');
     }
   }
 
-  setStatus("Done!");
+  setStatus(`Done — ${results.length} file(s) processed`, false);
 });
 
-exportBtn.addEventListener('click',()=>{
-  if(!results.length){alert("No data to export");return;}
-  const ws=XLSX.utils.json_to_sheet(results);
-  const wb=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb,ws,"Bills");
-  XLSX.writeFile(wb,"bills.xlsx");
+exportBtn.addEventListener('click', ()=>{
+  if(!results.length){ alert('No data to export'); return; }
+  const ws = XLSX.utils.json_to_sheet(results.map(r=>({ 'File Name': r.fileName, 'Meter No': r.meterNo, 'Consumption Qty': r.consumption })));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Bills');
+  XLSX.writeFile(wb, 'bills.xlsx');
 });
 
-clearBtn.addEventListener('click',()=>{
-  fileInput.value="";
-  results=[];
-  resultsTable.innerHTML="";
-  setStatus("Cleared");
+clearBtn.addEventListener('click', ()=>{
+  fileInput.value = '';
+  results = [];
+  resultsTable.innerHTML = '';
+  setStatus('Cleared', false);
 });
 </script>
 </body>
