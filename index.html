@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Water Bill OCR — Combined View</title>
+<title>Water Bill OCR — Upload Order</title>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
 <style>
@@ -31,8 +31,8 @@
 </head>
 <body>
 <header>
-  <h1>📄 Water Bill OCR (Combined View)</h1>
-  <p>Step 1 + Step 2 merged with manual correction</p>
+  <h1>📄 Water Bill OCR (Upload Order)</h1>
+  <p>Step 1 + Step 2 with Export of all Step 1 records</p>
 </header>
 
 <div class="card">
@@ -82,7 +82,6 @@ function calcDiff(prev, curr){
 }
 
 let prevData = [];
-let prevMap = {}, prevMapLast6 = {};
 let ocrResults = [];
 
 document.getElementById('prevExcel').addEventListener('change', e=>{
@@ -97,17 +96,9 @@ document.getElementById('prevExcel').addEventListener('change', e=>{
       let Name = r.Name || r.name || "";
       let Meter = r['Meter No.'] || r['meter no'] || r.Meter || "";
       let Cons = r.Consumption || r.consumption || "";
-      let cleaned = cleanMeter(Meter);
-      return {Name, Meter, CleanMeter: cleaned, Consumption: Cons};
-    });
-    prevMap = {}; prevMapLast6={};
-    prevData.forEach(r=>{
-      if(r.CleanMeter) prevMap[r.CleanMeter] = r;
-      const last6 = r.CleanMeter.replace(/[^0-9]/g,'').slice(-6);
-      if(last6) prevMapLast6[last6] = prevMapLast6[last6]||r;
+      return {Name, Meter, CleanMeter: cleanMeter(Meter), Consumption: Cons};
     });
     document.getElementById('prevStatus').innerText="Loaded "+prevData.length+" records.";
-    renderCombined();
   };
   reader.readAsArrayBuffer(file);
 });
@@ -118,36 +109,22 @@ function addOCRRow(preview, meterOCR, consumptionOCR, rawText){
 }
 
 function renderCombined(){
-  const combined = [];
-  prevData.forEach(r=>{
-    const match = ocrResults.find(o=> cleanMeter(o.meterOCR)===r.CleanMeter ||
-       cleanMeter(o.meterOCR).replace(/[^0-9]/g,'').slice(-6)===r.CleanMeter.replace(/[^0-9]/g,'').slice(-6));
-    if(match){
-      combined.push({
-        preview: match.preview,
-        name: r.Name, meterPrev: r.Meter, prevCons: r.Consumption,
-        meterOCR: match.meterOCR, consumptionOCR: match.consumptionOCR,
-        diffObj: calcDiff(r.Consumption, match.consumptionOCR),
-        rawText: match.rawText
-      });
-    } else {
-      combined.push({
-        preview:"", name:r.Name, meterPrev:r.Meter, prevCons:r.Consumption,
-        meterOCR:"Not Found", consumptionOCR:"Not Found",
-        diffObj:{text:"—",cls:"diff-gray"}, rawText:""
-      });
-    }
-  });
-  ocrResults.forEach(match=>{
-    const cleaned=cleanMeter(match.meterOCR);
+  const combined = ocrResults.map(o=>{
+    const cleaned = cleanMeter(o.meterOCR);
     const found = prevData.find(r=> r.CleanMeter===cleaned ||
-       cleaned.replace(/[^0-9]/g,'').slice(-6)===r.CleanMeter.replace(/[^0-9]/g,'').slice(-6));
-    if(!found){
-      combined.push({
-        preview:match.preview, name:"Not Found", meterPrev:"Not Found", prevCons:"Not Found",
-        meterOCR:match.meterOCR, consumptionOCR:match.consumptionOCR,
-        diffObj:{text:"—",cls:"diff-gray"}, rawText:match.rawText
-      });
+      cleaned.replace(/[^0-9]/g,'').slice(-6)===r.CleanMeter.replace(/[^0-9]/g,'').slice(-6));
+    if(found){
+      return {
+        preview:o.preview, name:found.Name, meterPrev:found.Meter, prevCons:found.Consumption,
+        meterOCR:o.meterOCR, consumptionOCR:o.consumptionOCR,
+        diffObj:calcDiff(found.Consumption, o.consumptionOCR), rawText:o.rawText
+      };
+    } else {
+      return {
+        preview:o.preview, name:"Not Found", meterPrev:"Not Found", prevCons:"Not Found",
+        meterOCR:o.meterOCR, consumptionOCR:o.consumptionOCR,
+        diffObj:{text:"—",cls:"diff-gray"}, rawText:o.rawText
+      };
     }
   });
   renderResults(combined);
@@ -201,9 +178,19 @@ function attachEditHandlers(rows){
 document.getElementById('clearBtn').addEventListener('click',()=>{ocrResults=[];renderCombined();});
 document.getElementById('exportBtn').addEventListener('click',()=>{
   const rows=[];
+  // Add OCR-based rows first (upload order)
   document.querySelectorAll('#results tr').forEach(tr=>{
     const cells=tr.querySelectorAll('td');
     rows.push({Name:cells[1].innerText,"Meter No.":cells[2].innerText,"Current Consumption":cells[5].querySelector('input').value});
+  });
+  // Add unmatched Step 1 rows
+  prevData.forEach(r=>{
+    const cleaned=r.CleanMeter;
+    const matched=rows.find(x=> cleanMeter(x["Meter No."])===cleaned ||
+      cleanMeter(x["Meter No."]).replace(/[^0-9]/g,'').slice(-6)===cleaned.replace(/[^0-9]/g,'').slice(-6));
+    if(!matched){
+      rows.push({Name:r.Name,"Meter No.":r.Meter,"Current Consumption":""});
+    }
   });
   const ws=XLSX.utils.json_to_sheet(rows);
   const wb=XLSX.utils.book_new();
