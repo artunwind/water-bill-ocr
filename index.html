@@ -1,13 +1,72 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Water Bill OCR v3</title>
-  <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Water Bill OCR — v3</title>
+
+  <!-- Tesseract + XLSX from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <h1>Water Bill OCR v3</h1>
-  <div id="app">App content here...</div>
+  <header>
+    <h1>📄 Water Bill OCR — v3</h1>
+    <p class="muted">Step 1: upload previous readings (Excel). Step 2: upload or take photos. Export includes all Step 1 rows.</p>
+  </header>
+
+  <main class="card">
+    <section>
+      <h2>Step 1 — Upload previous water bill (Excel)</h2>
+      <input id="prevExcel" type="file" accept=".xlsx,.xls" />
+      <div id="prevStatus" class="muted"></div>
+    </section>
+
+    <section>
+      <h2 class="section-title">Step 2 — New water bills
+        <button id="toggleDebug" class="btn secondary small">Show Debug</button>
+      </h2>
+
+      <div class="controls">
+        <label class="btn secondary">Upload Photo(s)
+          <input id="fileInput" type="file" accept="image/*" multiple hidden>
+        </label>
+
+        <label class="btn secondary">Take Photo
+          <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden>
+        </label>
+
+        <button id="clearBtn" class="btn">Clear</button>
+        <button id="exportBtn" class="btn primary">Export to Excel</button>
+        <span id="status" class="muted"></span>
+      </div>
+
+      <table id="resultsTable">
+        <thead>
+          <tr>
+            <th>Preview</th>
+            <th>Name</th>
+            <th>Meter No. (Prev)</th>
+            <th>Prev Consumption</th>
+            <th>Meter No. (OCR) <small>(editable)</small></th>
+            <th>Current Consumption (OCR) <small>(editable)</small></th>
+            <th>% Difference</th>
+          </tr>
+        </thead>
+        <tbody id="resultsBody"></tbody>
+      </table>
+
+      <div id="debug" class="card debug">
+        <h3>Debug (raw OCR + match info)</h3>
+        <pre id="debugLog"></pre>
+      </div>
+    </section>
+  </main>
+
+  <!-- floating draggable notification will be injected by JS -->
+
   <script src="app.js"></script>
 </body>
 </html>
